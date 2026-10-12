@@ -1,0 +1,240 @@
+openapi: 3.0.3
+info:
+  title: OfficeFlow API
+  description: 任务型 AI Agent 办公信息整理助手 API，首版完整实现会议纪要 Skill。
+  version: 1.1.0
+  contact:
+    name: 组号15
+servers:
+  - url: http://localhost:8000
+    description: 本地开发环境
+
+paths:
+  /api/generate:
+    post:
+      summary: 生成结构化纪要
+      description: 接收会议文本和任务类型，返回结构化纪要。首版仅 meeting_minutes 完整实现。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateRequest'
+      responses:
+        '200':
+          description: 生成成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateResponse'
+        '400':
+          description: 输入无效（如空输入）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: 工具失败或模型错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/export:
+    post:
+      summary: 导出 Markdown
+      description: 接收编辑后的纪要内容，生成 .md 文件。导出失败时返回错误，内容保留。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportRequest'
+      responses:
+        '200':
+          description: 导出成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportResponse'
+        '500':
+          description: 导出失败，可重试
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/retry:
+    post:
+      summary: 重试导出
+      description: 重试上一次失败的导出操作。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetryRequest'
+      responses:
+        '200':
+          description: 重试成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportResponse'
+        '500':
+          description: 重试仍失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/status/{session_id}:
+    get:
+      summary: 查询工具调用状态
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 状态查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+
+components:
+  schemas:
+    GenerateRequest:
+      type: object
+      required:
+        - input_text
+      properties:
+        input_text:
+          type: string
+          description: 会议原始文字记录，建议 ≤4000 汉字
+        task_type:
+          type: string
+          enum: [meeting_minutes, weekly_report, email_draft, web_summary]
+          description: 显式任务类型，若前端点击提示按钮则传递
+        session_id:
+          type: string
+          description: 可选会话 ID
+
+    GenerateResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+        task_type:
+          type: string
+        result:
+          $ref: '#/components/schemas/MeetingMinutes'
+        tool_logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolLog'
+
+    MeetingMinutes:
+      type: object
+      properties:
+        date:
+          type: string
+          example: "2026-10-09"
+        topic:
+          type: string
+        decisions:
+          type: array
+          items:
+            type: string
+        action_items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActionItem'
+
+    ActionItem:
+      type: object
+      properties:
+        task:
+          type: string
+        owner:
+          type: string
+          example: "张三"
+        deadline:
+          type: string
+          example: "2026-10-12"
+        evidence:
+          type: string
+          description: 原文证据片段
+
+    ToolLog:
+      type: object
+      properties:
+        tool_name:
+          type: string
+        status:
+          type: string
+          enum: [success, failed]
+        error_message:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    ExportRequest:
+      type: object
+      required:
+        - session_id
+        - content
+      properties:
+        session_id:
+          type: string
+        content:
+          type: string
+          description: 用户编辑后的 Markdown 内容
+
+    ExportResponse:
+      type: object
+      properties:
+        file_name:
+          type: string
+        download_url:
+          type: string
+        status:
+          type: string
+          enum: [success, failed]
+
+    RetryRequest:
+      type: object
+      required:
+        - session_id
+      properties:
+        session_id:
+          type: string
+
+    StatusResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+        task_type:
+          type: string
+        status:
+          type: string
+          enum: [idle, generating, exporting, failed, success]
+        tool_logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolLog'
+
+    ErrorResponse:
+      type: object
+      properties:
+        error_code:
+          type: string
+        message:
+          type: string
+        retryable:
+          type: boolean
