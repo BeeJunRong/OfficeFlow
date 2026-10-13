@@ -6,6 +6,7 @@
 导出/重试不走图，由 API 层显式触发（Q-02：导出必须用户点击）。
 """
 
+from datetime import datetime, timezone
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -15,8 +16,17 @@ from app.schemas import AgentState
 from app.skills import get_skill
 
 
+def _log(tool_name: str, status: str, error_message: str = "") -> dict[str, Any]:
+    return {
+        "tool_name": tool_name,
+        "status": status,
+        "error_message": error_message,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def route_node(state: AgentState) -> AgentState:
-    """路由节点：FR-00 分层路由。"""
+    """路由节点：FR-00 分层路由（路由步骤记入工具日志，供前端展示过程）。"""
     result = route_task(state.get("input_text", ""), state.get("task_type"))
     if result.needs_clarification or not result.task_type:
         return {
@@ -25,12 +35,20 @@ def route_node(state: AgentState) -> AgentState:
             "routed_by": result.routed_by,
             "needs_clarification": True,
             "error_message": "无法确定任务类型，请点击下方的任务按钮选择（会议纪要/周报整理/邮件草稿/网页整理）",
+            "tool_logs": [
+                *state.get("tool_logs", []),
+                _log("route", "failed", "无法确定任务类型（低置信度或无可用分类器）"),
+            ],
         }
     return {
         **state,
         "task_type": result.task_type,
         "routed_by": result.routed_by,
         "needs_clarification": False,
+        "tool_logs": [
+            *state.get("tool_logs", []),
+            _log("route", "success", f"task_type={result.task_type}（{result.routed_by}）"),
+        ],
     }
 
 

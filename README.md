@@ -14,7 +14,7 @@ Agent 编排（LangGraph）  route → parse/extract → validate（零编造）
 LLM 服务                 OpenAI 兼容协议（DeepSeek/Qwen/Ollama）；无 Key 时规则引擎离线降级
 ```
 
-设计文档见 `docs/`（proposal、architecture、guardrails、评测计划、需求追溯矩阵）。
+设计文档见 `docs/`（proposal、architecture、guardrails、评测计划、需求追溯矩阵、版本记录）。各版本交付明细见 `docs/版本.md`。
 
 ## 快速开始
 
@@ -74,9 +74,9 @@ app/
 └── tools/
     ├── extract_fields.py    # 结构化抽取（LLM + 规则降级）
     └── export_markdown.py   # Markdown 渲染与导出（可注入失败用于测试）
-frontend/app.py          # Streamlit 工作台
+frontend/app.py          # Streamlit 对话式工作台（ChatGPT 风格：空状态居中搜索框，提交后沉底，逐步展示工具调用过程）
 tests/                   # 13 例冻结合成样本 + pytest
-docs/                    # 架构/护栏/评测/追溯文档
+docs/                    # 架构/护栏/评测/追溯/版本记录文档
 ```
 
 ## 关键约束（见 docs/guardrails.md）
