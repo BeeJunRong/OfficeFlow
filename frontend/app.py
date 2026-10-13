@@ -15,7 +15,7 @@ import time
 import httpx
 import streamlit as st
 
-BACKEND = os.getenv("OFFICEFLOW_BACKEND", "http://localhost:8000")
+BACKEND = os.getenv("OFFICEFLOW_BACKEND", "http://localhost:8002")
 
 TASKS = [
     ("会议纪要", "meeting_minutes"),
@@ -27,7 +27,8 @@ TASKS = [
 # 工具名 → 人话说明（前端过程展示用）
 TOOL_LABELS = {
     "route": "识别任务类型（Skill 路由）",
-    "extract_fields": "调用结构化抽取工具（日期/主题/决定/待办）",
+    "extract_fields": "调用结构化抽取工具",
+    "web_fetch": "调用网页读取工具（单页，不登录不批量）",
     "validate": "调用零编造校验工具（无依据字段回退「待确认」）",
     "render_markdown": "调用 Markdown 生成工具",
     "export_markdown": "调用导出工具",
@@ -59,41 +60,63 @@ ss.setdefault("draft", "")            # 空状态居中搜索框的草稿
 
 # ---- 后端调用 ----
 
-def _generate(text: str, task_type: str | None) -> dict:
-    """调用 /api/generate；后端不可用时构造等价的错误响应（内容保留）。"""
+_ERROR_RESPONSE = {
+    "session_id": "", "task_type": "", "routed_by": "",
+    "needs_clarification": False, "markdown": "", "tool_logs": [],
+    "error_message": "",
+}
+
+
+def _post(path: str, payload: dict, timeout: float) -> dict | None:
+    """POST 并解析 JSON；任何失败（网络/非 JSON/非 200）返回 None。
+
+    专门防护：后端 500 时返回纯文本 'Internal Server Error'，
+    端口上不是后端时返回 HTML——这些都不能让页面崩溃。
+    """
     try:
-        resp = httpx.post(
-            f"{BACKEND}/api/generate",
-            json={"input_text": text, "task_type": task_type},
-            timeout=120,
-        ).json()
-        return resp if "detail" not in resp else {
-            "session_id": "", "task_type": task_type or "", "routed_by": "",
-            "needs_clarification": False, "markdown": "", "tool_logs": [],
-            "error_message": resp["detail"],
-        }
-    except httpx.HTTPError as exc:
+        resp = httpx.post(f"{BACKEND}{path}", json=payload, timeout=timeout)
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        return resp.json()
+    except ValueError:  # JSONDecodeError：响应不是 JSON
+        return None
+
+
+def _generate(text: str, task_type: str | None) -> dict:
+    """调用 /api/generate；失败时构造等价错误响应（内容保留，不崩页面）。"""
+    resp = _post(
+        "/api/generate", {"input_text": text, "task_type": task_type}, timeout=120
+    )
+    if resp is None:
         return {
-            "session_id": "", "task_type": task_type or "", "routed_by": "",
-            "needs_clarification": False, "markdown": "", "tool_logs": [],
-            "error_message": f"后端不可用：{exc}，请确认后端已启动后重试",
+            **_ERROR_RESPONSE,
+            "task_type": task_type or "",
+            "error_message": (
+                f"后端不可用或返回异常（{BACKEND}）。请确认后端已启动、"
+                "端口与前端配置一致，且代码为最新版本后重试"
+            ),
         }
+    if "detail" in resp:  # FastAPI 校验错误（如 400 空输入）
+        return {**_ERROR_RESPONSE, "error_message": resp["detail"]}
+    return resp
 
 
 def _export(session_id: str, content: str) -> tuple[bool, str]:
     """调用 /api/export（用户显式点击触发）；返回 (success, 路径或错误)。"""
-    try:
-        resp = httpx.post(
-            f"{BACKEND}/api/export",
-            json={
-                "session_id": session_id,
-                "content": content,
-                "filename": f"officeflow_{session_id or 'local'}",
-            },
-            timeout=60,
-        ).json()
-    except httpx.HTTPError as exc:
-        return False, f"导出失败：后端不可用（{exc}），可重试"
+    resp = _post(
+        "/api/export",
+        {
+            "session_id": session_id,
+            "content": content,
+            "filename": f"officeflow_{session_id or 'local'}",
+        },
+        timeout=60,
+    )
+    if resp is None:
+        return False, f"导出失败：后端不可用或返回异常（{BACKEND}），可重试"
     if resp.get("success"):
         return True, resp["file_path"]
     return False, resp.get("error_message", "导出失败，可重试")
@@ -161,39 +184,36 @@ def _render_turn(idx: int) -> None:
         if resp.get("error_message"):
             st.error(resp["error_message"])
 
-        # 生成结果：可编辑（导出内容以此为准）
+        # 生成结果：可编辑（导出内容以此为准），四种任务一致
         markdown = resp.get("markdown", "")
         if not markdown:
             return
-        if resp["task_type"] == "meeting_minutes":
-            st.markdown("**生成结果**（可编辑，导出以此为准）")
-            turn["edited"] = st.text_area(
-                "生成结果",
-                value=turn.get("edited", markdown),
-                height=320,
-                label_visibility="collapsed",
-                key=f"edit_{idx}",
-            )
-            c1, c2 = st.columns(2)
-            if c1.button("导出 .md", key=f"export_{idx}", type="primary"):
-                turn["export_result"] = _export(resp["session_id"], turn["edited"])
-                st.rerun()
-            prev = turn["export_result"]
-            if c2.button(
-                "重试导出",
-                key=f"retry_{idx}",
-                disabled=not (prev and not prev[0]),
-            ):
-                turn["export_result"] = _export(resp["session_id"], turn["edited"])
-                st.rerun()
-            if turn["export_result"] is not None:
-                ok, info = turn["export_result"]
-                if ok:
-                    st.success(f"导出成功：{info}")
-                else:
-                    st.error(f"{info}，内容已保留，可点击「重试导出」")
-        else:
-            st.info(markdown)
+        st.markdown("**生成结果**（可编辑，导出以此为准）")
+        turn["edited"] = st.text_area(
+            "生成结果",
+            value=turn.get("edited", markdown),
+            height=320,
+            label_visibility="collapsed",
+            key=f"edit_{idx}",
+        )
+        c1, c2 = st.columns(2)
+        if c1.button("导出 .md", key=f"export_{idx}", type="primary"):
+            turn["export_result"] = _export(resp["session_id"], turn["edited"])
+            st.rerun()
+        prev = turn["export_result"]
+        if c2.button(
+            "重试导出",
+            key=f"retry_{idx}",
+            disabled=not (prev and not prev[0]),
+        ):
+            turn["export_result"] = _export(resp["session_id"], turn["edited"])
+            st.rerun()
+        if turn["export_result"] is not None:
+            ok, info = turn["export_result"]
+            if ok:
+                st.success(f"导出成功：{info}")
+            else:
+                st.error(f"{info}，内容已保留，可点击「重试导出」")
 
 
 def _task_chips() -> None:
