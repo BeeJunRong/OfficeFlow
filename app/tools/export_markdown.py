@@ -15,28 +15,76 @@ EXPORT_DIR = Path(os.getenv("OFFICEFLOW_EXPORT_DIR", "exports"))
 
 
 def render_markdown(minutes: MeetingMinutes) -> str:
-    """结构化结果 → Markdown 文本（缺失字段显示"待确认"）。"""
+    """结构化结果 → 标准会议纪要模板（用户指定结构）。
+
+    六段式：会议议题 / 内容与讨论 / 决议 / 待办事项（表格）/ 风险与遗留问题 /
+    下次会议安排；头部为元信息栏。缺失字段统一"待确认"，不编造。
+    """
+    title = f"{minutes.topic}会议纪要" if minutes.topic != PENDING else "会议纪要"
+
+    def _people(names: list[str]) -> str:
+        return "、".join(names) if names else ""
+
+    def _numbered(items: list[str]) -> list[str]:
+        if not items:
+            return [f"1. {PENDING}"]
+        return [f"{i}. {item}" for i, item in enumerate(items, start=1)]
+
+    discussion_lines = (
+        _numbered(minutes.discussion)
+        if minutes.discussion
+        else ["（按议题记录汇报要点、讨论意见和共识）"]
+    )
+
     lines = [
-        f"# 会议纪要：{minutes.topic}",
+        f"# {title}",
         "",
-        f"- **会议日期**：{minutes.date}",
+        f"时间：{minutes.date}",
+        f"地点：{minutes.location}",
+        f"主持人：{minutes.host}",
+        f"出席人员：{_people(minutes.attendees)}",
+        f"列席人员：{_people(minutes.observers)}",
+        f"缺席人员：{_people(minutes.absentees)}",
+        f"记录人：{minutes.recorder}",
+        f"审核人：{minutes.reviewer}",
         "",
+        "## 一、会议议题",
+        *_numbered(minutes.agenda),
+        "",
+        "## 二、会议内容与讨论",
+        *discussion_lines,
+        "",
+        "## 三、会议决议",
+        *_numbered(minutes.decisions),
+        "",
+        "## 四、待办事项",
+        "",
+        "| 序号 | 事项 | 负责人 | 协办 | 截止时间 | 输出物 | 原文依据 |",
+        "|------|------|--------|------|----------|--------|----------|",
     ]
-    if minutes.decisions:
-        lines.append("## 关键决定")
-        lines.extend(f"- {d}" for d in minutes.decisions)
-        lines.append("")
     if minutes.action_items:
-        lines.append("## 待办事项")
-        lines.append("")
-        lines.append("| 事项 | 负责人 | 截止日期 | 原文依据 |")
-        lines.append("|------|--------|----------|----------|")
-        for item in minutes.action_items:
+        for i, item in enumerate(minutes.action_items, start=1):
             evidence = item.evidence.replace("|", "\\|") if item.evidence else ""
             lines.append(
-                f"| {item.task} | {item.owner} | {item.deadline} | {evidence} |"
+                f"| {i} | {item.task} | {item.owner} | {item.co_owner} "
+                f"| {item.deadline} | {item.deliverable} | {evidence} |"
             )
-        lines.append("")
+    lines += [
+        "",
+        "## 五、风险与遗留问题",
+        *_numbered(minutes.risks),
+        "",
+        "## 六、下次会议安排",
+        f"时间：{minutes.next_meeting.time}",
+        f"地点：{minutes.next_meeting.location}",
+        f"议题：{minutes.next_meeting.agenda}",
+        "",
+        f"附件：{_people(minutes.attachments)}",
+        f"记录人：{minutes.recorder}",
+        f"审核人：{minutes.reviewer}",
+        f"日期：{minutes.date}",
+        "",
+    ]
     return "\n".join(lines)
 
 

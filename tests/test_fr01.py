@@ -153,6 +153,65 @@ def test_zero_fabrication_validator():
     assert corrections2 == []
 
 
+def test_standard_template_structure():
+    """标准六段式模板：导出结构符合用户指定格式。"""
+    sample = get_sample("N1")
+    gen = client.post(
+        "/api/generate",
+        json={"input_text": sample["input"], "task_type": "meeting_minutes"},
+    ).json()
+    md = gen["markdown"]
+    # 元信息栏
+    for line in ("时间：", "地点：", "主持人：", "出席人员：", "列席人员：", "缺席人员：", "记录人：", "审核人："):
+        assert line in md, f"缺少元信息行: {line}"
+    # 六段式
+    for section in ("一、会议议题", "二、会议内容与讨论", "三、会议决议", "四、待办事项",
+                    "五、风险与遗留问题", "六、下次会议安排"):
+        assert section in md, f"缺少章节: {section}"
+    # 待办表头含协办与输出物列
+    assert "| 序号 | 事项 | 负责人 | 协办 | 截止时间 | 输出物 |" in md
+    # 尾部
+    assert "附件：" in md and "日期：" in md
+    # 缺失元信息标"待确认"（N1 无地点信息）
+    assert "地点：待确认" in md
+
+
+def test_meta_fields_extraction():
+    """元信息抽取：标签优先 + 隐式模式；议题/风险/下次会议/协办/输出物。"""
+    text = (
+        "2026年10月9日项目例会在图书馆会议室举行，由张三主持。"
+        "出席人员：张三、李四、王敏。记录人：王敏。"
+        "议题：纪要模块方案；导出功能设计。"
+        "决定先上线纪要模块。"
+        "待办：李四在10月12日前完成解析接口并提交接口文档，王敏协办。"
+        "存在风险：API 免费额度不足。"
+        "下次会议时间10月16日在第一会议室，议题为验收准备。"
+    )
+    resp = client.post(
+        "/api/generate", json={"input_text": text, "task_type": "meeting_minutes"}
+    )
+    assert resp.status_code == 200
+    result = resp.json()["structured_result"]
+    md = resp.json()["markdown"]
+    assert result["location"] == "图书馆会议室"
+    assert result["host"] == "张三"
+    assert result["attendees"] == ["张三", "李四", "王敏"]
+    assert result["recorder"] == "王敏"
+    assert any("纪要模块方案" in a for a in result["agenda"])
+    assert any("导出功能设计" in a for a in result["agenda"])
+    # 协办与输出物
+    todo = next(i for i in result["action_items"] if "解析接口" in i["task"])
+    assert todo["co_owner"] == "王敏"
+    assert todo["deliverable"] == "接口文档"
+    # 风险与下次会议
+    assert any("额度" in r for r in result["risks"])
+    assert "10月16日" in result["next_meeting"]["time"]
+    assert "第一会议室" in result["next_meeting"]["location"]
+    assert "验收准备" in md
+    # 隐式地点在 Markdown 中体现
+    assert "地点：图书馆会议室" in md
+
+
 def test_tool_logs_recorded():
     """FR-05：工具日志可查（名称/状态/错误/时间戳）。"""
     sample = get_sample("N1")

@@ -18,11 +18,17 @@ from app.schemas import PENDING, ActionItem, MeetingMinutes
 EXTRACT_SYSTEM_PROMPT = (
     "你是会议纪要抽取器。从用户提供的会议原始记录中抽取结构化字段。"
     "严格遵守零编造规则：只提取原文明确出现的信息；"
-    "原文没有的字段一律填字符串 \"待确认\"，不得推测或编造负责人、日期。"
+    "原文没有的字段一律填字符串 \"待确认\"（人员列表字段填空数组），"
+    "不得推测或编造负责人、日期、人员、地点。"
     "日期统一标准化为 YYYY-MM-DD；若原文只有月日无年份，可结合会议日期年份补全。"
     "每条待办必须附 evidence 字段：原文中支持该待办的简短原句片段。"
-    '输出 JSON：{"date": "...", "topic": "...", "decisions": ["..."], '
-    '"action_items": [{"task": "...", "owner": "...", "deadline": "...", "evidence": "..."}]}'
+    '输出 JSON：{"date": "...", "location": "...", "host": "...", '
+    '"attendees": ["..."], "observers": ["..."], "absentees": ["..."], '
+    '"recorder": "...", "reviewer": "...", "topic": "...", '
+    '"agenda": ["..."], "discussion": ["..."], "decisions": ["..."], '
+    '"action_items": [{"task": "...", "owner": "...", "co_owner": "...", '
+    '"deadline": "...", "deliverable": "...", "evidence": "..."}], '
+    '"risks": ["..."], "next_meeting": {"time": "...", "location": "...", "agenda": "..."}}'
 )
 
 # ---------- 规则抽取 ----------
@@ -85,6 +91,49 @@ def _extract_name(sent: str) -> str | None:
 
 # 话题：剥掉日期后的"XX例会/会议/周会/组会/评审/讨论"短语
 _TOPIC_RE = re.compile(r"[一-龥A-Za-z]{2,12}?(?:例会|周会|组会|会议|评审|讨论)")
+
+# ---------- 标准模板元信息（标签优先，缺省"待确认"，不编造） ----------
+
+_META_LABELS = {
+    "location": re.compile(r"地点[：:]\s*([^\n，。；]+)"),
+    "host": re.compile(r"主持人[：:]\s*([^\n，。；]+)"),
+    "recorder": re.compile(r"记录人[：:]\s*([^\n，。；]+)"),
+    "reviewer": re.compile(r"审核人[：:]\s*([^\n，。；]+)"),
+}
+_PEOPLE_LABELS = {
+    "attendees": re.compile(r"出席(?:人员|人)?[：:]\s*([^\n。]+)"),
+    "observers": re.compile(r"列席(?:人员|人)?[：:]\s*([^\n。]+)"),
+    "absentees": re.compile(r"缺席(?:人员|人)?[：:]\s*([^\n。]+)"),
+}
+_AGENDA_LABEL = re.compile(r"议题[：:]\s*([^\n]+)")
+
+# 隐式模式（原文常见表述）
+_IMPLICIT_LOCATION_RE = re.compile(
+    r"在([一-龥A-Za-z0-9]{2,12}(?:会议室|办公室|教室|实验室|礼堂|大厅|第一会议室|线上会议|线上))"
+)
+_IMPLICIT_HOST_RE = re.compile(r"由([一-龥]{2,4})(?:主持|担任主持)")
+_IMPLICIT_ATTENDEES_RE = re.compile(
+    r"([一-龥]{2,4}(?:[、，,][一-龥]{2,4}){1,11})(?:等?(?:共)?\d*人?)?(出席|参加)"
+)
+_IMPLICIT_RECORDER_RE = re.compile(r"由([一-龥]{2,4})(?:负责)?记录")
+
+# 协办 / 输出物（待办句内）
+_CO_OWNER_RE = re.compile(r"(?:协办|配合|协助)[：:]?\s*([一-龥]{2,4})")
+_DELIVERABLE_RE = re.compile(r"(?:输出|交付|提交|产出)[：:]?\s*([一-龥A-Za-z0-9]{2,16})")
+
+# 风险 / 下次会议
+_RISK_HINTS_RE = re.compile(r"风险|遗留问题|隐患|存在.{0,6}问题|担心")
+_NEXT_TIME_RE = re.compile(
+    r"下次会议[^。；]{0,12}?(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?|\d{1,2}月\d{1,2}日|下周[一二三四五六日末])"
+)
+_NEXT_LOCATION_RE = re.compile(
+    r"下次会议[^。；]{0,20}?(?:在|于)([一-龥A-Za-z0-9]{2,12}(?:会议室|办公室|教室|实验室|线上))"
+)
+_NEXT_AGENDA_RE = re.compile(r"下次会议[^。；]{0,12}(?:议题|讨论)(?:为|是|：|:)?\s*([^。；]+)")
+
+
+def _split_people(raw: str) -> list[str]:
+    return [p.strip() for p in re.split(r"[、，,\s]+", raw) if p.strip()]
 
 # 待办事项清洗：去掉日期/人名后的填充词
 _MARKER_RE = re.compile(r"^(待办|行动项|事项)[：:，,、]?")
@@ -229,17 +278,29 @@ def rule_based_extract(text: str) -> MeetingMinutes:
                     mo, d = re.match(r"(\d{1,2})月(\d{1,2})日", m.group(0)).groups()  # type: ignore[union-attr]
                     deadline = _norm_date(year, mo, d)
                 break
+        # 协办 / 输出物：待办句内的明确表述，缺省"待确认"
+        co_owner = PENDING
+        m = _CO_OWNER_RE.search(sent)
+        if m and m.group(1) in sent:
+            co_owner = m.group(1)
+        deliverable = PENDING
+        m = _DELIVERABLE_RE.search(sent)
+        if m:
+            deliverable = m.group(1)
         action_items.append(
             ActionItem(
                 task=_clean_task(sent, name),
                 owner=name or PENDING,
+                co_owner=co_owner,
                 deadline=deadline,
+                deliverable=deliverable,
                 evidence=sent,
             )
         )
         consumed.add(idx)
 
     # 决定判定：取提示词之后的内容；否定句（"没有形成决定"）跳过
+    decision_indexes: set[int] = set()
     for idx, sent in enumerate(sentences):
         if idx in consumed or _DECISION_NEGATION_RE.search(sent):
             continue
@@ -249,12 +310,100 @@ def rule_based_extract(text: str) -> MeetingMinutes:
         decision = _PUNCT_RE.sub("", sent[m.end():])
         if decision:
             decisions.append(decision)
+            decision_indexes.add(idx)
+
+    # ---- 标准模板元信息：标签优先 → 隐式模式，缺省"待确认" ----
+    meta: dict[str, str] = {}
+    for key, pattern in _META_LABELS.items():
+        m = pattern.search(text)
+        if m:
+            meta[key] = m.group(1).strip()
+    if "location" not in meta:
+        m = _IMPLICIT_LOCATION_RE.search(text)
+        if m:
+            meta["location"] = m.group(1)
+    if "host" not in meta:
+        m = _IMPLICIT_HOST_RE.search(text)
+        if m:
+            meta["host"] = m.group(1)
+    if "recorder" not in meta:
+        m = _IMPLICIT_RECORDER_RE.search(text)
+        if m:
+            meta["recorder"] = m.group(1)
+
+    people: dict[str, list[str]] = {}
+    for key, pattern in _PEOPLE_LABELS.items():
+        m = pattern.search(text)
+        if m:
+            people[key] = _split_people(m.group(1))
+    if "attendees" not in people:
+        m = _IMPLICIT_ATTENDEES_RE.search(text)
+        if m:
+            people["attendees"] = _split_people(m.group(1))
+
+    # 议题：标签列表
+    agenda: list[str] = []
+    m = _AGENDA_LABEL.search(text)
+    if m:
+        agenda = [
+            a.strip(" ，。,；;")
+            for a in re.split(r"[\n；;]+|(?:[一二三四五六七八九十\d]+[、.．])", m.group(1))
+            if a.strip(" ，。,；;")
+        ]
+
+    # 风险与遗留问题
+    risks: list[str] = []
+    risk_indexes: set[int] = set()
+    for idx, sent in enumerate(sentences):
+        if idx in consumed or idx in decision_indexes:
+            continue
+        if _RISK_HINTS_RE.search(sent):
+            risks.append(_PUNCT_RE.sub("", sent))
+            risk_indexes.add(idx)
+
+    # 会议内容与讨论：剩余句子（排除元信息行、纯"日期+会议名"开头句）
+    discussion: list[str] = []
+    meta_label_re = re.compile(r"(地点|主持人|记录人|审核人|出席|列席|缺席|议题)[：:]")
+    for idx, sent in enumerate(sentences):
+        if idx in consumed or idx in decision_indexes or idx in risk_indexes:
+            continue
+        if meta_label_re.search(sent):
+            continue
+        stripped = _strip_dates(sent)
+        # 纯"日期+XX例会/会议"开头的句子是标题句，不进讨论区
+        if _TOPIC_RE.search(stripped) and len(stripped) <= 20:
+            continue
+        cleaned = _PUNCT_RE.sub("", sent)
+        if cleaned:
+            discussion.append(cleaned)
+
+    # 下次会议安排
+    next_meeting: dict[str, str] = {}
+    for key, pattern in (
+        ("time", _NEXT_TIME_RE),
+        ("location", _NEXT_LOCATION_RE),
+        ("agenda", _NEXT_AGENDA_RE),
+    ):
+        m = pattern.search(text)
+        if m:
+            next_meeting[key] = m.group(1).strip("，。；、")
 
     return MeetingMinutes(
         date=meeting_date,
+        location=meta.get("location", PENDING),
+        host=meta.get("host", PENDING),
+        attendees=people.get("attendees", []),
+        observers=people.get("observers", []),
+        absentees=people.get("absentees", []),
+        recorder=meta.get("recorder", PENDING),
+        reviewer=meta.get("reviewer", PENDING),
         topic=topic,
+        agenda=agenda,
+        discussion=discussion,
         decisions=decisions,
         action_items=action_items,
+        risks=risks,
+        next_meeting=next_meeting,  # Pydantic 会转成 NextMeeting，缺失字段为"待确认"
     )
 
 
@@ -272,11 +421,29 @@ def llm_extract(text: str) -> MeetingMinutes | None:
             for item in raw.get("action_items", [])
             if isinstance(item, dict)
         ]
+        nm = raw.get("next_meeting") or {}
+        if not isinstance(nm, dict):
+            nm = {}
         return MeetingMinutes(
             date=raw.get("date", PENDING),
+            location=raw.get("location", PENDING),
+            host=raw.get("host", PENDING),
+            attendees=[str(p) for p in raw.get("attendees", [])],
+            observers=[str(p) for p in raw.get("observers", [])],
+            absentees=[str(p) for p in raw.get("absentees", [])],
+            recorder=raw.get("recorder", PENDING),
+            reviewer=raw.get("reviewer", PENDING),
             topic=raw.get("topic", PENDING),
+            agenda=[str(a) for a in raw.get("agenda", [])],
+            discussion=[str(d) for d in raw.get("discussion", [])],
             decisions=[str(d) for d in raw.get("decisions", [])],
             action_items=items,
+            risks=[str(r) for r in raw.get("risks", [])],
+            next_meeting={
+                "time": nm.get("time", PENDING),
+                "location": nm.get("location", PENDING),
+                "agenda": nm.get("agenda", PENDING),
+            },
         )
     except Exception:  # noqa: BLE001 - LLM 输出不符 schema 时整体降级
         return None

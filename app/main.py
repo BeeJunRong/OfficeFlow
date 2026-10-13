@@ -23,7 +23,6 @@ from app.schemas import (
     ExportResponse,
     GenerateRequest,
     GenerateResponse,
-    MeetingMinutes,
     RetryRequest,
     ToolLog,
 )
@@ -71,12 +70,7 @@ def generate(req: GenerateRequest) -> GenerateResponse:
             session_id, state["structured_result"], state.get("export_status", "pending")
         )
 
-    structured = None
-    if state.get("structured_result"):
-        try:
-            structured = MeetingMinutes(**state["structured_result"])
-        except Exception:  # noqa: BLE001
-            structured = None
+    structured = state.get("structured_result") or None
 
     return GenerateResponse(
         session_id=session_id,

@@ -29,10 +29,10 @@ export OFFICEFLOW_MODEL_BASE_URL="https://api.deepseek.com/v1"   # 默认 DeepSe
 export OFFICEFLOW_MODEL_NAME="deepseek-chat"
 
 # 3. 启动后端（端口 8000）
-conda run -n officeflow uvicorn app.main:app --reload
+conda activate officeflow && uvicorn app.main:app --reload
 
 # 4. 启动前端（另开终端）
-conda run -n officeflow streamlit run frontend/app.py
+conda activate officeflow && streamlit run frontend/app.py
 ```
 
 ## 测试
