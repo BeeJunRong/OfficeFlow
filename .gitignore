@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 运行产物
+exports/
+*.db
+*.sqlite3
+.pytest_cache/
+
+# 环境变量与密钥
+.env
+
+# IDE
+.idea/
+.vscode/
