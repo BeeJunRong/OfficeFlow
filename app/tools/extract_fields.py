@@ -226,6 +226,23 @@ def _split_sentences(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+_TODO_CLAUSE_SEPARATOR_RE = re.compile(
+    r"[，,]\s*(?=[一-龥]{2,4}在"
+    r"(?:\d{1,4}[年/-])?\d{1,2}[月/-]\d{1,2}日?前"
+    r"(?:完成|提交|编写|准备|整理|负责|跟进|推进|落实|开发|测试|制作|修改|完善))"
+)
+
+
+def _split_todo_clauses(sentence: str) -> list[str]:
+    """Split one todo sentence into clauses, one owner assignment per clause."""
+    return [part.strip() for part in _TODO_CLAUSE_SEPARATOR_RE.split(sentence) if part.strip()]
+
+
+def _clean_evidence(sentence: str) -> str:
+    """Keep the source clause while removing the routing marker from its start."""
+    return _MARKER_RE.sub("", sentence, count=1).strip(" ，,")
+
+
 def _strip_dates(s: str) -> str:
     for regex, _ in _DATE_PATTERNS:
         s = regex.sub("", s)
@@ -284,7 +301,11 @@ def rule_based_extract(text: str) -> MeetingMinutes:
     action_items: list[ActionItem] = []
     consumed: set[int] = set()
 
-    sentences = _split_sentences(text)
+    sentences = [
+        clause
+        for sentence in _split_sentences(text)
+        for clause in _split_todo_clauses(sentence)
+    ]
     for idx, sent in enumerate(sentences):
         # 待办判定：显式"待办/行动项"标记，或（待办语义动词 + 人名）
         if _TODO_NEGATION_RE.search(sent):
@@ -328,7 +349,7 @@ def rule_based_extract(text: str) -> MeetingMinutes:
                 co_owner=co_owner,
                 deadline=deadline,
                 deliverable=deliverable,
-                evidence=sent,
+                evidence=_clean_evidence(sent),
             )
         )
         consumed.add(idx)
