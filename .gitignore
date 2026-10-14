@@ -13,6 +13,22 @@ exports/
 *.sqlite3
 .pytest_cache/
 
+# 测试与 pip 的临时目录（pytest tmp_path、pip 中断残留）
+# 这些目录通常是空的，git 本就不跟踪空目录；但一旦里面落了文件就会被误提交，
+# 所以显式忽略。pytest-of-* 是 pytest 的 basetemp 目录，跑测试会反复重建。
+pytest-of-*/
+tmp*/
+pip-*/
+
+# 手工下载的 wheel 缓存（依赖已装进 .venv，无需入库）
+.setup-wheels/
+
+# 启动脚本的进程记录与日志（scripts/start.ps1）
+.run/
+
+# 调研临时产物（GitHub API dump、README 快照）
+.research/
+
 # 环境变量与密钥
 .env
 

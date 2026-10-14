@@ -6,3 +6,10 @@ pytest>=8.3
 streamlit>=1.39
 langgraph>=0.2.60
 langchain-core>=0.3
+
+# .env 配置加载（app/env.py）；缺失时不阻断启动，仅回落操作系统环境变量
+python-dotenv>=1.0
+
+# 结构化抽取与原文溯源（docs/开源选型.md 方案 A）
+# 中文场景必须配合 UnicodeTokenizer 使用，见 app/tools/langextract_extract.py
+langextract[openai]>=1.7

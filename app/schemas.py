@@ -63,30 +63,107 @@ class MeetingMinutes(BaseModel):
     attachments: list[str] = Field(default_factory=list, description="附件")
 
 
-class WorkItem(BaseModel):
-    """周报中的单项工作事项（本周完成 / 下周计划通用）。"""
+# 注：v0.3 线曾在此定义过一套简版 WeeklyReport / EmailDraft（period+work_done、
+# subject+recipient+key_points）。v0.6 合并时按"本地 v0.4 设计为准"统一为本文件
+# 后半部分的 EmailDraft / WeeklyReport（收件人列表 + 协议、进展/下周计划）。
 
-    content: str = Field(description="工作事项")
-    status: str = Field(default=PENDING, description="状态：已完成/进行中/待确认")
+
+# ---------- 邮件草稿（FR-03） ----------
+
+# 发送协议：默认 draft_only（只出草稿，不发送），满足 Q-02 默认路径 100% 合规。
+# 任何协议下，发送动作都必须由用户显式点击触发，生成流程绝不自动发送。
+EMAIL_PROTOCOLS = ("draft_only", "mailto", "smtp")
+DEFAULT_EMAIL_PROTOCOL = "draft_only"
+
+PROTOCOL_LABELS = {
+    "draft_only": "仅生成草稿（不发送，可复制/导出）",
+    "mailto": "调用本机邮件客户端发送（mailto 链接）",
+    "smtp": "由服务端 SMTP 直发（需在 .env 配置，且每封需显式确认）",
+}
+
+
+class EmailRecipient(BaseModel):
+    """单个收件人：姓名来自纪要抽取，邮箱由用户手填，内容由系统生成。"""
+
+    name: str = Field(description="姓名（来自会议纪要抽取的负责人）")
+    email: str = Field(default="", description="邮箱；用户手动填写，系统绝不编造")
+    content: str = Field(default="", description="发给该收件人的正文内容")
+    send: bool = Field(default=False, description="是否发送（用户显式勾选，默认不发）")
+
+    @property
+    def email_valid(self) -> bool:
+        """简易邮箱格式校验（仅用于前端提示与发送前拦截）。"""
+        import re as _re
+
+        return bool(_re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", self.email or ""))
+
+
+class EmailDraft(BaseModel):
+    """邮件草稿：发件人（本人）+ 协议 + 收件人列表。
+
+    UI 规格（用户需求）：
+      显示本人 → 协议 → 从会议纪要分析出的人数 → 名字/邮箱/内容/发送
+    """
+
+    sender: str = Field(default=PENDING, description="发件人（本人）；缺失显示待确认")
+    protocol: str = Field(
+        default=DEFAULT_EMAIL_PROTOCOL, description="发送协议，默认 draft_only（不发送）"
+    )
+    subject: str = Field(default="", description="邮件主题")
+    greeting: str = Field(default="", description="称呼语（可按收件人替换）")
+    recipients: list[EmailRecipient] = Field(
+        default_factory=list, description="收件人列表，来自纪要中的负责人"
+    )
+    shared_body: str = Field(default="", description="公共正文（可编辑，作为各封邮件的基础）")
+    source_topic: str = Field(default=PENDING, description="来源会议主题（溯源用）")
+    source_date: str = Field(default=PENDING, description="来源会议日期（溯源用）")
+
+    @property
+    def recipient_count(self) -> int:
+        return len(self.recipients)
+
+    @property
+    def selected_count(self) -> int:
+        """已勾选发送的人数（0 表示仅保存草稿）。"""
+        return sum(1 for r in self.recipients if r.send)
+
+
+# ---------- 周报整理（FR-02） ----------
+
+
+class WeeklyReportItem(BaseModel):
+    """周报条目：保留 owner/deadline/evidence，便于零编造核对。"""
+
+    content: str = Field(description="条目内容")
+    owner: str = Field(default=PENDING, description="负责人")
+    deadline: str = Field(default=PENDING, description="截止/计划时间")
     evidence: str = Field(default="", description="原文证据片段")
 
 
 class WeeklyReport(BaseModel):
-    """周报结构化输出（FR-02）。"""
+    """周报结构化输出：由会议纪要派生（决定→进展，待办→下周计划）。"""
 
-    period: str = Field(default=PENDING, description="统计周期（如 2026-10-06 ~ 2026-10-12）")
-    work_done: list[WorkItem] = Field(default_factory=list, description="本周完成工作")
-    plans: list[WorkItem] = Field(default_factory=list, description="下周计划")
-    risks: list[str] = Field(default_factory=list, description="风险与问题")
+    period: str = Field(default=PENDING, description="报告周期")
+    topic: str = Field(default=PENDING, description="来源会议主题")
+    progress: list[WeeklyReportItem] = Field(
+        default_factory=list, description="本周进展（来自关键决定）"
+    )
+    next_plan: list[WeeklyReportItem] = Field(
+        default_factory=list, description="下周计划（来自待办事项）"
+    )
+    risks: list[str] = Field(default_factory=list, description="风险与待确认项")
+    source_date: str = Field(default=PENDING, description="来源会议日期（溯源用）")
 
 
-class EmailDraft(BaseModel):
-    """邮件草稿结构化输出（FR-03；只生成草稿，不发送）。"""
+# ---------- 派生（多 Skill 编排：理解 C） ----------
 
-    subject: str = Field(default=PENDING, description="邮件主题")
-    recipient: str = Field(default=PENDING, description="收件人称呼")
-    sender: str = Field(default=PENDING, description="落款署名")
-    key_points: list[str] = Field(default_factory=list, description="正文要点（来自用户输入，不编造）")
+
+class DerivedTask(BaseModel):
+    """可派生的下游任务（由当前产物推导，需用户点击才执行）。"""
+
+    task_type: str = Field(description="可派生的任务类型")
+    label: str = Field(description="按钮文案")
+    reason: str = Field(default="", description="为何可派生（含人数/条目数等依据）")
 
 
 class GenerateRequest(BaseModel):
@@ -100,6 +177,49 @@ class GenerateRequest(BaseModel):
     )
 
 
+class DeriveRequest(BaseModel):
+    """POST /api/derive 请求体：基于已有会话产物派生下游任务（理解 C）。
+
+    复用源会话已抽取的结构化结果，**不重新抽取**（省 token、保证一致）。
+    """
+
+    session_id: str = Field(description="源会话 id（会议纪要那一轮的 session_id）")
+    task_type: str = Field(description="要派生的任务类型，如 email_draft / weekly_report")
+
+
+class EmailSendRequest(BaseModel):
+    """POST /api/email/send 请求体：显式发送（Q-02：必须用户点击触发）。"""
+
+    session_id: str = Field(default="", description="关联会话 id（用于工具日志）")
+    protocol: str = Field(default=DEFAULT_EMAIL_PROTOCOL, description="发送协议")
+    sender: str = Field(default="", description="发件人显示名")
+    subject: str = Field(default="", description="邮件主题")
+    recipients: list[EmailRecipient] = Field(
+        default_factory=list, description="仅 send=True 的收件人会被处理"
+    )
+    confirm: bool = Field(
+        default=False, description="显式确认；False 时仅返回预览，不执行任何发送"
+    )
+
+
+class EmailSendResult(BaseModel):
+    """单个收件人的发送结果。"""
+
+    name: str
+    email: str
+    status: str = Field(description="sent / preview / skipped / failed")
+    detail: str = ""
+
+
+class EmailSendResponse(BaseModel):
+    """POST /api/email/send 响应体。"""
+
+    protocol: str
+    dry_run: bool = Field(description="True 表示未真正发送（预览/草稿模式）")
+    results: list[EmailSendResult] = Field(default_factory=list)
+    error_message: str = ""
+
+
 class ToolLog(BaseModel):
     """单次工具调用日志，用于前端工具状态面板与验收证据。"""
 
@@ -110,7 +230,12 @@ class ToolLog(BaseModel):
 
 
 class GenerateResponse(BaseModel):
-    """POST /api/generate 响应体。"""
+    """POST /api/generate 响应体。
+
+    多产物契约：`structured_result` 保留为会议纪要专用字段（向后兼容），
+    其余 Skill 各用专有字段（email_draft / weekly_report / web_summary）；
+    `derived_tasks` 承载"可继续派生"的建议（理解 C）。
+    """
 
     session_id: str
     task_type: str
@@ -119,7 +244,15 @@ class GenerateResponse(BaseModel):
         default=False, description="路由置信度不足时为 True，前端应提示用户选择任务类型"
     )
     message: str = ""
-    structured_result: Optional[dict] = None
+    structured_result: Optional[MeetingMinutes] = None
+    email_draft: Optional[EmailDraft] = None
+    weekly_report: Optional[WeeklyReport] = None
+    web_summary: Optional[WebSummary] = None
+    derived_tasks: list[DerivedTask] = Field(
+        default_factory=list,
+        description="基于本次产物可继续生成的任务；需用户点击才执行（理解 C）",
+    )
+    derived_from: str = Field(default="", description="派生来源会话 id（空=本轮为原始输入）")
     markdown: str = ""
     tool_logs: list[ToolLog] = Field(default_factory=list)
     error_message: str = ""
@@ -153,6 +286,33 @@ class RetryRequest(BaseModel):
     inject_failure: bool = False
 
 
+class ConfigUpdateRequest(BaseModel):
+    """POST /api/config 请求体（Web 配置面板保存）。
+
+    - `updates` 中**空字符串会被忽略**（视为"用户没改这一项"），
+      避免前端表单留空时把已配置的 Key 抹掉；
+    - 需要清空某键时放进 `clear`。
+    """
+
+    updates: dict[str, str] = Field(
+        default_factory=dict, description="要写入的配置项；空值忽略"
+    )
+    clear: list[str] = Field(
+        default_factory=list, description="需要清空的配置项（白名单内）"
+    )
+
+
+class ConfigTestRequest(BaseModel):
+    """POST /api/config/test 请求体：测试模型连通性（可传未保存的值）。"""
+
+    base_url: Optional[str] = Field(default=None, description="留空则用当前生效值")
+    api_key: Optional[str] = Field(
+        default=None, description="留空则用当前生效值；本地端点可不填"
+    )
+    model_name: Optional[str] = Field(default=None, description="留空则用当前生效值")
+    timeout: float = Field(default=20.0, description="超时秒数")
+
+
 class AgentState(TypedDict, total=False):
     """LangGraph 工作流状态（architecture.md §5.2）。"""
 
@@ -162,6 +322,10 @@ class AgentState(TypedDict, total=False):
     needs_clarification: bool
     input_text: str
     structured_result: dict[str, Any]
+    email_draft: dict[str, Any]
+    weekly_report: dict[str, Any]
+    derived_tasks: list[dict[str, Any]]
+    derived_from: str
     markdown: str
     edited_content: str
     tool_logs: list[dict[str, Any]]

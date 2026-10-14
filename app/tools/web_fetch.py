@@ -97,9 +97,13 @@ def fetch_page(url: str) -> tuple[Optional[WebPage], str]:
         return None, f"不支持的内容类型：{content_type or '未知'}（仅支持网页/文本）"
 
     body = resp.text[:MAX_BYTES]
-    # 登录页粗判：正文里出现典型登录表单特征即拒绝（不做任何登录）
-    if re.search(r"(登录|login|sign[- ]?in).{0,80}(password|密码|账号|验证码)", body, re.I) or \
-       re.search(r"(password|密码).{0,80}(登录|login|sign[- ]?in)", body, re.I):
+    # 登录页粗判：正文里出现典型登录表单特征即拒绝（不做任何登录）。
+    # 注意必须带 re.S：HTML 里"登录"与"密码"通常跨行，否则该护栏会静默失效。
+    if re.search(
+        r"(登录|login|sign[- ]?in).{0,80}(password|密码|账号|验证码)", body, re.I | re.S
+    ) or re.search(
+        r"(password|密码).{0,80}(登录|login|sign[- ]?in)", body, re.I | re.S
+    ):
         return None, "该网页疑似需要登录（检测到登录表单），首版不支持，请提供无需登录的页面"
 
     extractor = _TextExtractor()

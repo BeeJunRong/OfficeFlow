@@ -94,7 +94,7 @@ def test_generate_api_web_summary(monkeypatch):
     assert resp.status_code == 200
     data = resp.json()
     assert data["task_type"] == "web_summary"
-    result = data["structured_result"]
+    result = data["web_summary"]
     assert result["title"] == "会议纪要写作指南"
     assert result["url"].startswith("https://example.com")
     assert len(result["points"]) >= 2
