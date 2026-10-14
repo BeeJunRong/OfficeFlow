@@ -168,12 +168,36 @@ def test_standard_template_structure():
     for section in ("一、会议议题", "二、会议内容与讨论", "三、会议决议", "四、待办事项",
                     "五、风险与遗留问题", "六、下次会议安排"):
         assert section in md, f"缺少章节: {section}"
-    # 待办表头含协办与输出物列
-    assert "| 序号 | 事项 | 负责人 | 协办 | 截止时间 | 输出物 |" in md
+    # 待办表头含协办、输出物与原文依据列
+    assert "| 序号 | 事项 | 负责人 | 协办 | 截止时间 | 输出物 | 原文依据 |" in md
     # 尾部
     assert "附件：" in md and "日期：" in md
     # 缺失元信息标"待确认"（N1 无地点信息）
     assert "地点：待确认" in md
+
+
+def test_comma_separated_todos_keep_separate_evidence():
+    """Comma-separated owner assignments become separate rows and evidence."""
+    text = (
+        "2026年10月9日项目例会，决定先上线纪要模块。"
+        "待办：张三在10月12日前完成解析接口，李四在10月13日前完成前端页面。"
+    )
+    response = client.post(
+        "/api/generate",
+        json={"input_text": text, "task_type": "meeting_minutes"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    items = data["structured_result"]["action_items"]
+    assert [(item["task"], item["owner"], item["deadline"]) for item in items] == [
+        ("解析接口", "张三", "2026-10-12"),
+        ("前端页面", "李四", "2026-10-13"),
+    ]
+    assert [item["evidence"] for item in items] == [
+        "张三在10月12日前完成解析接口",
+        "李四在10月13日前完成前端页面",
+    ]
+    assert "待办：" not in data["markdown"]
 
 
 def test_meta_fields_extraction():

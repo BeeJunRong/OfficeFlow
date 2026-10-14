@@ -31,7 +31,7 @@ from env_loader import load_env  # noqa: E402
 
 load_env()
 
-BACKEND = os.getenv("OFFICEFLOW_BACKEND", "http://localhost:8000")
+BACKEND = os.getenv("OFFICEFLOW_BACKEND", "http://localhost:8001")
 
 TASKS = [
     ("会议纪要", "meeting_minutes"),
