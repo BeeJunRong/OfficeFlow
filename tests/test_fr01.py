@@ -228,14 +228,19 @@ def test_tool_logs_recorded():
     assert status["tool_logs"], "状态端点无工具日志"
 
 
-def test_placeholder_skills_return_p1():
-    """FR-02/03/04 占位：生成结果返回 P1 开发中。"""
-    for task_type in ("weekly_report", "email_draft", "web_summary"):
-        resp = client.post(
-            "/api/generate",
-            json={"input_text": "请整理", "task_type": task_type},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["task_type"] == task_type
-        assert "P1" in data["markdown"]
+def test_all_skills_implemented_no_placeholder():
+    """FR-02/03/04 均已实现：注册表中不再有占位 Skill。
+
+    v0.6 合并后 `app/skills/placeholders.py` 已删除（网页整理由 v0.3 线落地，
+    单页读取实现见 tests/test_web_summary.py）。
+    """
+    from app.skills import SKILLS
+    from app.skills.base import Skill
+
+    assert set(SKILLS) == {
+        "meeting_minutes",
+        "weekly_report",
+        "email_draft",
+        "web_summary",
+    }
+    assert all(isinstance(skill, Skill) for skill in SKILLS.values())

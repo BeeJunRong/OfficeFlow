@@ -9,7 +9,13 @@ import os
 import time
 from pathlib import Path
 
-from app.schemas import MeetingMinutes, PENDING
+from app.schemas import (
+    PROTOCOL_LABELS,
+    PENDING,
+    EmailDraft,
+    MeetingMinutes,
+    WeeklyReport,
+)
 
 EXPORT_DIR = Path(os.getenv("OFFICEFLOW_EXPORT_DIR", "exports"))
 
@@ -85,6 +91,93 @@ def render_markdown(minutes: MeetingMinutes) -> str:
         f"日期：{minutes.date}",
         "",
     ]
+    return "\n".join(lines)
+
+
+def render_email_markdown(draft: EmailDraft) -> str:
+    """邮件草稿 → Markdown（用于预览与导出 .md）。
+
+    明确标注协议与"未发送"状态，避免用户误以为邮件已发出（Q-02 可核对）。
+    """
+    protocol_label = PROTOCOL_LABELS.get(draft.protocol, draft.protocol)
+    lines = [
+        "# 邮件草稿（未发送）",
+        "",
+        f"- **发件人（本人）**：{draft.sender}",
+        f"- **发送协议**：{protocol_label}",
+        f"- **来源会议**：{draft.source_topic}（{draft.source_date}）",
+        f"- **收件人**：{draft.recipient_count} 位",
+        "",
+        f"**主题**：{draft.subject}",
+        "",
+        "---",
+        "",
+    ]
+    if not draft.recipients:
+        lines.append(
+            "_未能从会议纪要中分析出负责人，无法生成收件人。"
+            "请手动补充负责人后重试。_"
+        )
+        lines.append("")
+        return "\n".join(lines)
+
+    for i, r in enumerate(draft.recipients, start=1):
+        addr = r.email or "（待你填写）"
+        lines.append(f"## {i}. {r.name} &lt;{addr}&gt;")
+        lines.append("")
+        lines.append(f"- 邮箱：{addr}")
+        lines.append(f"- 发送：{'是' if r.send else '否'}")
+        lines.append("")
+        lines.append("```text")
+        lines.append(r.content or "（内容为空）")
+        lines.append("```")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append(
+        "> 本文件仅为草稿。邮箱地址需由你手动填写；"
+        "是否发送由你在界面中逐封确认，本工具不会自动发送。"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_weekly_markdown(report: WeeklyReport) -> str:
+    """周报 → Markdown（缺失字段显示"待确认"）。"""
+    lines = [
+        f"# 周报：{report.topic}",
+        "",
+        f"- **报告周期**：{report.period}",
+        f"- **来源会议日期**：{report.source_date}",
+        "",
+        "## 本周进展",
+    ]
+    if report.progress:
+        lines.extend(f"- {p.content}" for p in report.progress)
+    else:
+        lines.append(f"- {PENDING}")
+    lines.append("")
+
+    lines.append("## 下周计划")
+    if report.next_plan:
+        lines.append("")
+        lines.append("| 事项 | 负责人 | 计划完成 | 原文依据 |")
+        lines.append("|------|--------|----------|----------|")
+        for it in report.next_plan:
+            evidence = it.evidence.replace("|", "\\|") if it.evidence else ""
+            lines.append(
+                f"| {it.content} | {it.owner} | {it.deadline} | {evidence} |"
+            )
+    else:
+        lines.append(f"- {PENDING}")
+    lines.append("")
+
+    if report.risks:
+        lines.append("## 风险与待确认")
+        lines.extend(f"- {r}" for r in report.risks)
+        lines.append("")
+
     return "\n".join(lines)
 
 
