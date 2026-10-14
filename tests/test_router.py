@@ -57,6 +57,30 @@ def test_body_only_keyword_routes_to_clarification():
     assert result.task_type == ""
 
 
+def test_short_body_keyword_does_not_misroute():
+    """回归：**短正文**以关键词开头时也不得误路由（guardrails §3 点名场景）。
+
+    修复前的缺陷：无冒号时前 16 字整段被当作指令区，
+    "下周周报由李四负责。"（10 字）里的"周报"因此落进指令区，
+    被误判为 weekly_report。修复后无冒号须含请求意图标记才认定为指令。
+    """
+    for body in [
+        "下周周报由李四负责。",
+        "下周周报由李四负责，邮件模板由王五整理。",
+        "会议记录已经整理完了。",
+        "网页内容需要重新抓取。",
+    ]:
+        result = route_task(body)
+        assert result.routed_by != "keyword", f"短正文被误判为指令: {body}"
+        assert result.task_type == "", f"短正文误路由: {body} → {result.task_type}"
+        assert result.needs_clarification is True
+
+    # 带请求意图标记时仍应正常命中关键词（不能矫枉过正）
+    assert route_task("帮我整理周报，本周完成了……").task_type == "weekly_report"
+    assert route_task("请写一份邮件草稿，收件人是张三").task_type == "email_draft"
+    assert route_task("整理会议纪要 今天讨论了排期").task_type == "meeting_minutes"
+
+
 def test_split_instruction():
     assert split_instruction("帮我做会议纪要：正文内容") == ("帮我做会议纪要", "正文内容")
     assert split_instruction("帮我做会议纪要：正文：含冒号") == ("帮我做会议纪要", "正文：含冒号")

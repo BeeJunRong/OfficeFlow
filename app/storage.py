@@ -159,6 +159,35 @@ class LogStore:
             "export_records": exports,
         }
 
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        """取会话基础信息（派生时需要源会话的 input_text 与 task_type）。"""
+        if not self.enabled:
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT session_id, task_type, input_text, created_at FROM sessions"
+                " WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_structured_result(self, session_id: str) -> dict[str, Any] | None:
+        """取会话的结构化产物（派生时复用，避免重新抽取）。"""
+        if not self.enabled:
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT structured_output FROM results WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+        if not row or not row["structured_output"]:
+            return None
+        try:
+            parsed = json.loads(row["structured_output"])
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
 
 _store: LogStore | None = None
 

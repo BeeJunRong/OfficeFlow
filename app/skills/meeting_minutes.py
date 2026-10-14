@@ -68,7 +68,12 @@ class MeetingMinutesSkill(Skill):
         # 解析 + 抽取节点
         try:
             minutes, engine = extract_meeting_minutes(text)
-            log("extract_fields", "success", "" if engine == "llm" else f"引擎=规则降级")
+            engine_label = {
+                "langextract": "引擎=LangExtract 原文溯源",
+                "llm": "引擎=LLM",
+                "rule": "引擎=规则降级",
+            }.get(engine, f"引擎={engine}")
+            log("extract_fields", "success", engine_label)
         except Exception as exc:  # noqa: BLE001
             log("extract_fields", "failed", str(exc))
             return {

@@ -46,6 +46,30 @@ class RouteResult:
 
 INSTRUCTION_MAX_LEN = 16  # 指令区最长字符数；超长视为正文而非短指令
 
+# 指令意图标记：**无冒号**时必须出现在开头，短文本才被当作"指令"。
+# 否则像"下周周报由李四负责。"这种 10 字的会议正文会被当成短指令，
+# 正文里的"周报"落进指令区 → 误路由（guardrails §3 明令禁止的场景）。
+# 限制"开头"是必要的：描述句里也会出现这些词
+# （如"会议记录已经整理完了。"含"整理"，但它是叙述而非指令）。
+INSTRUCTION_MARKERS = (
+    "帮我", "给我", "请你", "麻烦", "请",
+    "整理", "做", "写", "生成", "总结", "处理", "来一份", "一份",
+)
+_INSTRUCTION_MARKER_RE = re.compile("|".join(map(re.escape, INSTRUCTION_MARKERS)))
+
+# 允许标记前出现的最多字符数（覆盖"帮我整理…""请你写…"这类前缀）
+_INSTRUCTION_MARKER_LEAD = 2
+
+
+def has_instruction_marker(text: str) -> bool:
+    """指令区**开头**是否含"请求意图"标记（帮我/请/整理/做/写…）。
+
+    用于区分"用户在下指令"与"正文恰好含这些词"，见 INSTRUCTION_MARKERS 注释。
+    要求标记落在前 _INSTRUCTION_MARKER_LEAD 个字符之内：
+    "整理周报…""帮我整理周报…"通过，"会议记录已经整理完了。"不通过。
+    """
+    return bool(_INSTRUCTION_MARKER_RE.search((text or "")[:_INSTRUCTION_MARKER_LEAD]))
+
 
 def split_instruction(text: str) -> tuple[str, str]:
     """把输入拆为（指令区, 正文）。
@@ -70,7 +94,8 @@ def route_task(input_text: str, explicit_task_type: str | None = None) -> RouteR
     """分层路由入口。
 
     - explicit_task_type 来自前端提示按钮，优先级最高且锁定。
-    - 关键词只匹配指令区（≤16 字符的短指令）。
+    - 关键词只匹配指令区（≤16 字符的短指令）；**无冒号**时还要求指令区含
+      请求意图标记（帮我/请/整理/做…），否则短正文会因含关键词被误判为指令。
     - LLM 兜底；不可用或低置信度 → needs_clarification=True。
     """
     if explicit_task_type:
@@ -83,8 +108,12 @@ def route_task(input_text: str, explicit_task_type: str | None = None) -> RouteR
         return RouteResult(task_type="", routed_by="none", needs_clarification=True)
 
     # 第二层：指令区关键词（仅短指令区；正文关键词不触发）
+    # 有冒号 → 冒号前的短头部即为用户写的指令，可直接匹配；
+    # 无冒号 → 前 16 字可能整段都是正文（如"下周周报由李四负责。"），
+    #          必须含请求意图标记才认定为"指令"，否则交给 LLM 兜底/追问。
     instruction, _ = split_instruction(text)
-    if instruction:
+    has_colon = ("：" in text) or (":" in text)
+    if instruction and (has_colon or has_instruction_marker(instruction)):
         for keyword, task_type in KEYWORD_TABLE:
             if keyword in instruction:
                 return RouteResult(task_type=task_type, routed_by="keyword")

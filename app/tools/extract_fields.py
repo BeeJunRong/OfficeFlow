@@ -1,13 +1,17 @@
 """结构化抽取工具：会议文本 → MeetingMinutes（architecture.md §6）。
 
-两层实现：
-1. LLM 抽取（配置 API Key 时优先）——输出仍需经校验节点零编造检查。
-2. 规则抽取（离线降级/无 Key 时）——确定性正则 + 关键词模式，
+三层实现，逐级降级：
+1. LangExtract 抽取（显式开启且依赖/Key 就绪时优先）——输出带字符级原文溯源
+   （char_interval），对齐失败的结果直接丢弃，零编造由库层面保证。
+   见 app/tools/langextract_extract.py。
+2. LLM 抽取（配置 API Key 时）——输出仍需经校验节点零编造检查。
+3. 规则抽取（离线降级/无 Key 时）——确定性正则 + 关键词模式，
    保证无网络环境下 13 例样本可离线复现，且天然不编造。
 
-两层都只填原文明确出现的字段，缺失留 "待确认"，由校验节点兜底。
+三层都只填原文明确出现的字段，缺失留 "待确认"，由校验节点兜底。
 """
 
+import logging
 import re
 from datetime import datetime
 from typing import Any
@@ -15,21 +19,43 @@ from typing import Any
 from app.llm import get_llm
 from app.schemas import PENDING, ActionItem, MeetingMinutes
 
-EXTRACT_SYSTEM_PROMPT = (
-    "你是会议纪要抽取器。从用户提供的会议原始记录中抽取结构化字段。"
-    "严格遵守零编造规则：只提取原文明确出现的信息；"
-    "原文没有的字段一律填字符串 \"待确认\"（人员列表字段填空数组），"
-    "不得推测或编造负责人、日期、人员、地点。"
-    "日期统一标准化为 YYYY-MM-DD；若原文只有月日无年份，可结合会议日期年份补全。"
-    "每条待办必须附 evidence 字段：原文中支持该待办的简短原句片段。"
-    '输出 JSON：{"date": "...", "location": "...", "host": "...", '
-    '"attendees": ["..."], "observers": ["..."], "absentees": ["..."], '
-    '"recorder": "...", "reviewer": "...", "topic": "...", '
-    '"agenda": ["..."], "discussion": ["..."], "decisions": ["..."], '
-    '"action_items": [{"task": "...", "owner": "...", "co_owner": "...", '
-    '"deadline": "...", "deliverable": "...", "evidence": "..."}], '
-    '"risks": ["..."], "next_meeting": {"time": "...", "location": "...", "agenda": "..."}}'
-)
+logger = logging.getLogger("officeflow.extract")
+
+
+def build_extract_prompt(current_year: int | None = None) -> str:
+    """构造抽取提示词（字段清单=标准六段式模板，与 schemas.MeetingMinutes 对齐）。
+
+    年份补全规则必须写死"用哪个年"，否则模型会自己猜：
+    实测 B4（原文只有"10月14日"、全篇无年份）时模型返回了 **2024**-10-14，
+    被零编造校验器拦下回退为"待确认"（护栏生效，但不符合
+    guardrails §2"时间信息可按明确年月日标准化"的预期）。
+    这里改为显式指定优先级：文档内已有年份 > 当前年份。
+    """
+    year = current_year or datetime.now().year
+    return (
+        "你是会议纪要抽取器。从用户提供的会议原始记录中抽取结构化字段。"
+        "严格遵守零编造规则：只提取原文明确出现的信息；"
+        "原文没有的字段一律填字符串 \"待确认\"（人员列表字段填空数组），"
+        "不得推测或编造负责人、日期、人员、地点。"
+        "日期统一标准化为 YYYY-MM-DD。原文只有月日、没有年份时，"
+        f"按以下优先级补全年份：① 同一篇原文中已出现的年份；② 若全篇无任何年份，"
+        f"则使用当前年份 {year}。（补全年份属于 guardrails §2 允许的"
+        "「明确年月日标准化」，不算编造；但年份绝不可臆测为其它数字。）"
+        "原文完全没有日期依据时，一律填 \"待确认\"。"
+        "topic 用原文中出现的会议名称原样短语，不要增删词。"
+        "每条待办必须附 evidence 字段：原文中支持该待办的简短原句片段。"
+        '输出 JSON：{"date": "...", "location": "...", "host": "...", '
+        '"attendees": ["..."], "observers": ["..."], "absentees": ["..."], '
+        '"recorder": "...", "reviewer": "...", "topic": "...", '
+        '"agenda": ["..."], "discussion": ["..."], "decisions": ["..."], '
+        '"action_items": [{"task": "...", "owner": "...", "co_owner": "...", '
+        '"deadline": "...", "deliverable": "...", "evidence": "..."}], '
+        '"risks": ["..."], "next_meeting": {"time": "...", "location": "...", "agenda": "..."}}'
+    )
+
+
+# 向后兼容：默认提示词（使用当前年份）
+EXTRACT_SYSTEM_PROMPT = build_extract_prompt()
 
 # ---------- 规则抽取 ----------
 
@@ -118,7 +144,11 @@ _IMPLICIT_ATTENDEES_RE = re.compile(
 _IMPLICIT_RECORDER_RE = re.compile(r"由([一-龥]{2,4})(?:负责)?记录")
 
 # 协办 / 输出物（待办句内）
+# 两种语序都要认：主语后置（"王敏协办"）与前置（"协办：王敏"）。
 _CO_OWNER_RE = re.compile(r"(?:协办|配合|协助)[：:]?\s*([一-龥]{2,4})")
+_CO_OWNER_PREFIX_RE = re.compile(r"([一-龥]{2,4})(?:负责)?(?:协办|配合|协助)")
+# 规则抽取的降级路径要挡掉最常见的非人名误命中
+_NOT_A_NAME = {"共同", "大家", "我们", "全体", "全员", "部门", "团队", "双方", "各方"}
 _DELIVERABLE_RE = re.compile(r"(?:输出|交付|提交|产出)[：:]?\s*([一-龥A-Za-z0-9]{2,16})")
 
 # 风险 / 下次会议
@@ -283,6 +313,10 @@ def rule_based_extract(text: str) -> MeetingMinutes:
         m = _CO_OWNER_RE.search(sent)
         if m and m.group(1) in sent:
             co_owner = m.group(1)
+        else:
+            m = _CO_OWNER_PREFIX_RE.search(sent)
+            if m and m.group(1) not in _NOT_A_NAME:
+                co_owner = m.group(1)
         deliverable = PENDING
         m = _DELIVERABLE_RE.search(sent)
         if m:
@@ -412,7 +446,7 @@ def llm_extract(text: str) -> MeetingMinutes | None:
     llm = get_llm()
     if not llm.is_available:
         return None
-    raw: Any = llm.chat_json(EXTRACT_SYSTEM_PROMPT, text)
+    raw: Any = llm.chat_json(build_extract_prompt(), text)
     if raw is None:
         return None
     try:
@@ -450,7 +484,27 @@ def llm_extract(text: str) -> MeetingMinutes | None:
 
 
 def extract_meeting_minutes(text: str) -> tuple[MeetingMinutes, str]:
-    """抽取入口：返回 (结构化结果, 使用的引擎标记 llm/rule)。"""
+    """抽取入口：返回 (结构化结果, 使用的引擎标记)。
+
+    引擎优先级（逐级降级，保证任何环境都能出结果）：
+    1. ``langextract`` —— 需显式开启且装好依赖且配置 Key；带字符级原文溯源。
+    2. ``llm``         —— OfficeFlow 自带的 OpenAI 兼容 JSON 抽取。
+    3. ``rule``        —— 确定性规则引擎，离线可用（无 Key 时的默认路径）。
+
+    LangExtract 失败时记 warning 并降级，不向用户暴露异常；
+    是否真正启用由 ``OFFICEFLOW_LANGEXTRACT_ENABLE`` 决定（默认关闭）。
+    """
+    try:
+        from app.tools.langextract_extract import (
+            extract_meeting_minutes as langextract_extract,
+        )
+        from app.tools.langextract_extract import is_available as langextract_available
+
+        if langextract_available():
+            return langextract_extract(text)
+    except Exception as exc:  # noqa: BLE001 - 任何失败都降级到既有路径
+        logger.warning("LangExtract 抽取失败，降级到 LLM/规则抽取：%s", exc)
+
     result = llm_extract(text)
     if result is not None:
         return result, "llm"
