@@ -1,8 +1,8 @@
 """OfficeFlow 前端工作台：ChatGPT 风格对话式界面。
 
 交互形态（用户要求）：
-- 空状态：页面中央只有一个搜索框 + 四个任务提示按钮（类似 ChatGPT 首页）。
-- 提交后：搜索框沉到底部固定（st.chat_input），中央区域变成对话流。
+- 空状态：页面中央显示自适应输入框，底部操作栏包含五个任务标签和发送按钮。
+- 提交后：同一个输入组件平滑沉到底部固定，中央区域变成对话流。
 - 对话流中逐步展示 Agent 调用了什么工具（路由 → 抽取 → 校验 → 生成），
   让用户看到一步步产出最终结果的原理；会议纪要/周报/邮件/网页整理同一套流程。
 - 每轮结果可编辑、可导出/重试；导出仅由用户显式点击触发（Q-02）。
@@ -28,6 +28,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from env_loader import load_env  # noqa: E402
+from composer import chat_composer  # noqa: E402
 
 load_env()
 
@@ -56,7 +57,7 @@ st.markdown(
     """
     <style>
       #MainMenu, footer, [data-testid="stStatusWidget"] {visibility: hidden;}
-      .block-container {padding-top: 2.5rem; padding-bottom: 7rem; max-width: 760px;}
+      .block-container {padding-top: 2.5rem; padding-bottom: var(--of-composer-height, 220px); max-width: 760px;}
       [data-testid="stChatInput"] {max-width: 760px;}
       .of-center {text-align: center;}
       .of-sub {color: #888; text-align: center; margin-top: -0.5rem;}
@@ -78,7 +79,8 @@ st.markdown(
 ss = st.session_state
 ss.setdefault("turns", [])            # 每轮：{user, response, animated, export_result}
 ss.setdefault("locked_task_type", None)  # 显式点击锁定的任务类型
-ss.setdefault("draft", "")            # 空状态居中搜索框的草稿
+ss.setdefault("composer_epoch", 0)
+ss.setdefault("pending_message", None)
 
 
 # ---- 后端调用 ----
@@ -613,23 +615,6 @@ def _render_result(idx: int, turn: dict) -> None:
     _derived_block(idx, response)
 
 
-def _task_chips() -> None:
-    """任务提示按钮：显式点击锁定任务类型（FR-00 显式优先）。"""
-    cols = st.columns(len(TASKS) + 1)
-    for col, (label, task_type) in zip(cols, TASKS):
-        active = ss.locked_task_type == task_type
-        if col.button(
-            f"{'●' if active else ''}{label}".lstrip(),
-            key=f"chip_{task_type}",
-            use_container_width=True,
-        ):
-            ss.locked_task_type = task_type
-            st.rerun()
-    if cols[-1].button("自动识别", key="chip_auto", use_container_width=True):
-        ss.locked_task_type = None
-        st.rerun()
-
-
 # ---- 配置面板 ----
 #
 # 位置：页面内容区右上角（Streamlit 工具栏 Deploy 按钮正下方）。
@@ -969,65 +954,62 @@ def _config_topbar() -> None:
 
 # ---- 页面 ----
 
-_config_topbar()
+def _receive_message() -> None:
+    event = ss["message_composer"].get("submitted")
+    if event and event.get("text", "").strip() and not ss.pending_message:
+        allowed = {task for _, task in TASKS}
+        ss.locked_task_type = event.get("task") if event.get("task") in allowed else None
+        ss.pending_message = event["text"].strip()
 
-if not ss.turns:
-    # 空状态：居中搜索框（类似 ChatGPT 首页）
-    st.markdown("<div class='of-spacer'></div>", unsafe_allow_html=True)
-    st.markdown("<h1 class='of-center'>OfficeFlow</h1>", unsafe_allow_html=True)
+
+_config_topbar()
+has_conversation = bool(ss.turns or ss.pending_message)
+
+if not has_conversation:
     st.markdown(
-        "<p class='of-sub'>会议纪要 · 周报整理 · 邮件草稿 · 网页整理<br>"
-        "粘贴文字，剩下的交给 Agent —— 执行过程全程可见</p>",
+        "<div class='of-welcome'><h1>OfficeFlow</h1>"
+        "<p>把日常办公，交给一个对话框。</p></div>"
+        "<style>.of-welcome {position:fixed;top:calc(50dvh - 165px);"
+        "left:0;width:100%;text-align:center;pointer-events:none;}"
+        ".of-welcome h1 {font-size:2rem;padding:0;}"
+        ".of-welcome p {opacity:.55;font-size:.95rem;}</style>",
         unsafe_allow_html=True,
     )
-
-    draft = st.text_area(
-        "搜索框",
-        value=ss.draft,
-        height=180,
-        placeholder="在此输入或粘贴内容，例如：帮我做会议纪要：2026年10月9日项目例会……",
-        label_visibility="collapsed",
-    )
-    ss.draft = draft
-
-    _task_chips()
-    if ss.locked_task_type:
-        st.caption(f"已选择任务类型：**{ss.locked_task_type}**（显式点击优先，正文关键词不影响路由）")
-
-    _, center, _ = st.columns([2, 1, 2])
-    if center.button("开始处理", type="primary", use_container_width=True,
-                     disabled=not draft.strip(), key="start_button"):
-        text = draft.strip()
-        ss.draft = ""
-        _submit(text)
-        st.rerun()  # 切换到对话模式，搜索框沉底
-    else:
-        # 空状态缺少引导会让人以为页面没内容，这里补一行提示
-        st.markdown(
-            "<p class='of-sub' style='font-size:0.85rem;margin-top:1rem'>"
-            "用法：① 点上方任务按钮（锁定任务类型）→ ② 粘贴原文 → ③ 点「开始处理」"
-            "→ ④ 检查结果并「导出 .md」"
-            "<br>先用 <b>会议纪要</b> 试：把一段会议记录粘进去即可"
-            "</p>",
-            unsafe_allow_html=True,
-        )
 else:
-    # 对话模式：顶部标题 + 新建对话
     tcol, ncol = st.columns([4, 1])
     tcol.markdown("#### 📋 OfficeFlow")
-    if ncol.button("新建对话", use_container_width=True):
+    if ncol.button("新建对话", use_container_width=True, disabled=bool(ss.pending_message)):
         ss.turns = []
+        ss.locked_task_type = None
+        ss.composer_epoch += 1
         st.rerun()
-
-    # 对话流（先渲染历史，再处理新输入）
     for idx in range(len(ss.turns)):
         _render_turn(idx)
+    if ss.pending_message:
+        with st.chat_message("user"):
+            st.markdown(ss.pending_message)
 
-    # 底部：任务提示按钮 + 固定的输入框（st.chat_input 自动沉底）
-    _task_chips()
-    if ss.locked_task_type:
-        st.caption(f"当前任务类型：**{ss.locked_task_type}**（点击上方按钮可切换，或选「自动识别」）")
-    user_text = st.chat_input("输入内容，粘贴后回车发送……")
-    if user_text and user_text.strip():
-        _submit(user_text.strip())
-        st.rerun()
+prompts = {
+    "meeting_minutes": "请将以下会议记录整理成会议纪要：\n",
+    "weekly_report": "请将以下工作记录整理成周报：\n",
+    "email_draft": "请根据以下内容撰写邮件草稿：\n",
+    "web_summary": "请整理以下网页的内容：\n",
+}
+chat_composer(
+    key="message_composer",
+    data={
+        "docked": has_conversation,
+        "busy": bool(ss.pending_message),
+        "task": ss.locked_task_type,
+        "epoch": ss.composer_epoch,
+        "tasks": [(label, task, prompts[task]) for label, task in TASKS]
+        + [("自动识别", None, "")],
+    },
+    on_submitted_change=_receive_message,
+)
+
+if ss.pending_message:
+    with st.spinner("正在整理内容…"):
+        _submit(ss.pending_message)
+    ss.pending_message = None
+    st.rerun()

@@ -13,6 +13,10 @@ exports/
 *.sqlite3
 .pytest_cache/
 
+# 文档生成/渲染产物（如 output/documents/*.docx、render/*.png、review.pdf）
+# 体积可达数十 MB，且都是可再生成的中间物，不入库。
+output/
+
 # 测试与 pip 的临时目录（pytest tmp_path、pip 中断残留）
 # 这些目录通常是空的，git 本就不跟踪空目录；但一旦里面落了文件就会被误提交，
 # 所以显式忽略。pytest-of-* 是 pytest 的 basetemp 目录，跑测试会反复重建。
