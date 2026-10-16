@@ -3,7 +3,7 @@ uvicorn[standard]>=0.32
 pydantic>=2.9
 httpx>=0.27
 pytest>=8.3
-streamlit>=1.39
+streamlit>=1.51
 langgraph>=0.2.60
 langchain-core>=0.3
 
