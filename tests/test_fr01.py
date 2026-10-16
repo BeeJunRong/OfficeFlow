@@ -200,6 +200,75 @@ def test_comma_separated_todos_keep_separate_evidence():
     assert "待办：" not in data["markdown"]
 
 
+def test_semicolon_separated_todos_with_spaced_date_render_as_two_rows():
+    """Different todo separators and whitespace before a date remain independent."""
+    text = (
+        "2026年10月11日需求评审会。主题是周报模板。决定采用统一字段。"
+        "待办：王琳于10月15日前整理字段清单；赵明在 10月16日前完成模板页面。"
+    )
+    response = client.post(
+        "/api/generate",
+        json={"input_text": text, "task_type": "meeting_minutes"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    items = data["structured_result"]["action_items"]
+    assert [(item["task"], item["owner"], item["deadline"]) for item in items] == [
+        ("字段清单", "王琳", "2026-10-15"),
+        ("模板页面", "赵明", "2026-10-16"),
+    ]
+    assert data["markdown"].count("| 1 |") == 1
+    assert data["markdown"].count("| 2 |") == 1
+    assert "主题是周报模板" in data["markdown"]
+    assert "2. 赵明在" not in data["markdown"]
+    assert "3. 10月16日前完成模板页面" not in data["markdown"]
+
+
+def test_responsible_todos_with_full_dates_render_as_two_rows():
+    """Repeated '负责' assignments are split into independent todos."""
+    text = (
+        "2026-10-12接口联调会议，讨论任务状态。"
+        "会议决定任务结果由后端统一返回。"
+        "刘敏负责在2026-10-14前完成状态接口，陈杰负责在2026-10-15前接入前端。"
+    )
+    response = client.post(
+        "/api/generate",
+        json={"input_text": text, "task_type": "meeting_minutes"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    items = data["structured_result"]["action_items"]
+    assert [(item["task"], item["owner"], item["deadline"]) for item in items] == [
+        ("状态接口", "刘敏", "2026-10-14"),
+        ("接入前端", "陈杰", "2026-10-15"),
+    ]
+    assert [item["evidence"] for item in items] == [
+        "刘敏负责在2026-10-14前完成状态接口",
+        "陈杰负责在2026-10-15前接入前端",
+    ]
+
+
+def test_line_wrapped_todo_date_stays_in_one_row():
+    """A line break inside a date must not split the todo into discussion text."""
+    text = (
+        "2026年10月13日安全评审会。决定首版不自动发送邮件。"
+        "待办：周宁于10月17日前补充导出失败提示；孙倩在10月18\n日前完成安全测试。"
+    )
+    response = client.post(
+        "/api/generate",
+        json={"input_text": text, "task_type": "meeting_minutes"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    items = data["structured_result"]["action_items"]
+    assert [(item["task"], item["owner"], item["deadline"]) for item in items] == [
+        ("补充导出失败提示", "周宁", "2026-10-17"),
+        ("安全测试", "孙倩", "2026-10-18"),
+    ]
+    assert "孙倩在10月18" not in data["structured_result"]["discussion"]
+    assert "日前完成安全测试" not in data["structured_result"]["discussion"]
+
+
 def test_meta_fields_extraction():
     """元信息抽取：标签优先 + 隐式模式；议题/风险/下次会议/协办/输出物。"""
     text = (

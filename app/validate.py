@@ -15,7 +15,7 @@ from datetime import datetime
 from app.schemas import PENDING, ActionItem, MeetingMinutes
 
 _YMD_RE = re.compile(r"(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})日?")
-_MD_RE = re.compile(r"(?<!\d)(\d{1,2})月(\d{1,2})日(?!\d)")
+_MD_RE = re.compile(r"(?<!\d)(\d{1,2})月(\d{1,2})\s*日(?!\d)")
 
 
 def _norm(y: int, m: int, d: int) -> str | None:

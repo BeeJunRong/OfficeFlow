@@ -86,21 +86,26 @@ ss.setdefault("draft", "")            # 空状态居中搜索框的草稿
 def _generate(text: str, task_type: str | None) -> dict:
     """调用 /api/generate；后端不可用时构造等价的错误响应（内容保留）。"""
     try:
-        resp = httpx.post(
+        response = httpx.post(
             f"{BACKEND}/api/generate",
             json={"input_text": text, "task_type": task_type},
             timeout=120,
-        ).json()
+        )
+        response.raise_for_status()
+        resp = response.json()
         return resp if "detail" not in resp else {
             "session_id": "", "task_type": task_type or "", "routed_by": "",
             "needs_clarification": False, "markdown": "", "tool_logs": [],
             "error_message": resp["detail"],
         }
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ValueError) as exc:
         return {
             "session_id": "", "task_type": task_type or "", "routed_by": "",
             "needs_clarification": False, "markdown": "", "tool_logs": [],
-            "error_message": f"后端不可用：{exc}，请确认后端已启动后重试",
+            "error_message": (
+                f"后端请求失败：{exc}（响应不是有效 JSON 或 HTTP 状态异常），"
+                "请确认后端已启动后重试"
+            ),
         }
 
 
@@ -109,7 +114,7 @@ def _export(
 ) -> tuple[bool, str]:
     """调用 /api/export（用户显式点击触发）；返回 (success, 路径或错误)。"""
     try:
-        resp = httpx.post(
+        response = httpx.post(
             f"{BACKEND}/api/export",
             json={
                 "session_id": session_id,
@@ -117,9 +122,11 @@ def _export(
                 "filename": filename or f"officeflow_{session_id or 'local'}",
             },
             timeout=60,
-        ).json()
-    except httpx.HTTPError as exc:
-        return False, f"导出失败：后端不可用（{exc}），可重试"
+        )
+        response.raise_for_status()
+        resp = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return False, f"导出失败：后端响应异常（{exc}），可重试"
     if resp.get("success"):
         return True, resp["file_path"]
     return False, resp.get("error_message", "导出失败，可重试")
