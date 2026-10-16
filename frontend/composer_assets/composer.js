@@ -9,8 +9,11 @@ export default function ({parentElement, data, setTriggerValue}) {
     input.value = '';
     shell.task = data.task;
     shell.chatEpoch = data.epoch;
+    shell.classList.toggle('docked', data.docked);
   }
-  shell.classList.toggle('docked', data.docked);
+  // A rerun may acknowledge submission while the local transition is running.
+  // Only a new conversation may return this same node to the welcome position.
+  if (data.docked) shell.classList.add('docked');
   let busy = data.busy;
   const update = () => {
     input.style.height = 'auto';
@@ -23,9 +26,8 @@ export default function ({parentElement, data, setTriggerValue}) {
       button.setAttribute('aria-pressed', String(button.dataset.task === (shell.task || '')));
     });
   };
-  chips.replaceChildren();
-  for (const [label, task, prompt] of data.tasks) {
-    const button = document.createElement('button');
+  for (const [index, [label, task, prompt]] of data.tasks.entries()) {
+    const button = chips.children[index] || document.createElement('button');
     button.type = 'button';
     button.className = 'chip';
     button.textContent = label;
@@ -37,16 +39,24 @@ export default function ({parentElement, data, setTriggerValue}) {
       update();
       input.focus();
     };
-    chips.appendChild(button);
+    if (!button.parentNode) chips.appendChild(button);
   }
+  let transitionFrame;
+  let notifyFrame;
   const submit = () => {
     const text = input.value.trim();
     if (busy || !text) return;
     busy = true;
     input.value = '';
-    shell.classList.add('docked');
     update();
-    setTriggerValue('submitted', {text, task: shell.task});
+    // Paint the cleared, still-mounted input before changing position and
+    // notifying Python. The backend rerun must not precede this local update.
+    transitionFrame = requestAnimationFrame(() => {
+      shell.classList.add('docked');
+      notifyFrame = requestAnimationFrame(() => {
+        setTriggerValue('submitted', {text, task: shell.task});
+      });
+    });
   };
   input.oninput = update;
   input.onkeydown = event => {
@@ -61,5 +71,9 @@ export default function ({parentElement, data, setTriggerValue}) {
     document.documentElement.style.setProperty('--of-composer-height', `${shell.offsetHeight + 24}px`);
   });
   observer.observe(shell);
-  return () => observer.disconnect();
+  return () => {
+    observer.disconnect();
+    cancelAnimationFrame(transitionFrame);
+    cancelAnimationFrame(notifyFrame);
+  };
 }
