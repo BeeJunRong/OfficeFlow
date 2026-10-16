@@ -1,12 +1,13 @@
 :host {font-family: var(--st-font, sans-serif);}
 .composer-shell {
   position: fixed; z-index: 50; box-sizing: border-box; width: min(720px, calc(100% - 32px));
-  left: 50%; bottom: calc(50dvh - 120px); transform: translateX(-50%);
+  left: 50%; bottom: 0; transform: translate(-50%, calc(-50dvh + 120px));
+  padding: 12px 0 max(12px, env(safe-area-inset-bottom));
+  background: var(--st-background-color, #fff);
   color: var(--st-text-color, #31333f);
-  transition: bottom 420ms cubic-bezier(.22, 1, .36, 1);
+  transition: transform 420ms cubic-bezier(.22, 1, .36, 1);
 }
-.composer-shell.docked {bottom: 0; padding: 12px 0 max(12px, env(safe-area-inset-bottom));
-  background: var(--st-background-color, #fff);}
+.composer-shell.docked {transform: translate(-50%, 0);}
 .composer-card {background: var(--st-background-color, #fff); border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
   border-radius: 26px; padding: 16px 16px 12px; box-shadow: 0 6px 28px #0000000a;}
 .composer-card:focus-within {border-color: color-mix(in srgb, var(--st-primary-color, #ff4b4b) 60%, transparent);

@@ -969,8 +969,29 @@ def _receive_message() -> None:
         ss.pending_message = event["text"].strip()
 
 
-_config_topbar()
+# Mount before every conditional/dynamic element: a stable key alone does not
+# preserve a custom component when its Streamlit delta path changes.
 has_conversation = bool(ss.turns or ss.pending_message)
+prompts = {
+    "meeting_minutes": "请将以下会议记录整理成会议纪要：\n",
+    "weekly_report": "请将以下工作记录整理成周报：\n",
+    "email_draft": "请根据以下内容撰写邮件草稿：\n",
+    "web_summary": "请整理以下网页的内容：\n",
+}
+chat_composer(
+    key="message_composer",
+    data={
+        "docked": has_conversation,
+        "busy": bool(ss.pending_message),
+        "task": ss.locked_task_type,
+        "epoch": ss.composer_epoch,
+        "tasks": [(label, task, prompts[task]) for label, task in TASKS]
+        + [("自动识别", None, "")],
+    },
+    on_submitted_change=_receive_message,
+)
+
+_config_topbar()
 
 if not has_conversation:
     st.markdown(
@@ -996,24 +1017,6 @@ else:
         with st.chat_message("user"):
             st.markdown(ss.pending_message)
 
-prompts = {
-    "meeting_minutes": "请将以下会议记录整理成会议纪要：\n",
-    "weekly_report": "请将以下工作记录整理成周报：\n",
-    "email_draft": "请根据以下内容撰写邮件草稿：\n",
-    "web_summary": "请整理以下网页的内容：\n",
-}
-chat_composer(
-    key="message_composer",
-    data={
-        "docked": has_conversation,
-        "busy": bool(ss.pending_message),
-        "task": ss.locked_task_type,
-        "epoch": ss.composer_epoch,
-        "tasks": [(label, task, prompts[task]) for label, task in TASKS]
-        + [("自动识别", None, "")],
-    },
-    on_submitted_change=_receive_message,
-)
 
 if ss.pending_message:
     with st.spinner("正在整理内容…"):
