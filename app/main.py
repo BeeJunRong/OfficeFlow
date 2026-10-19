@@ -52,7 +52,7 @@ from app.storage import get_store  # noqa: E402
 from app.tools.email_send import process_send  # noqa: E402
 from app.tools.export_markdown import export_markdown  # noqa: E402
 
-app = FastAPI(title="OfficeFlow", version="0.6.0")
+app = FastAPI(title="OfficeFlow", version="1.6.0")
 
 # Streamlit 前端独立端口运行，需要跨域
 app.add_middleware(

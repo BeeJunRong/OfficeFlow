@@ -11,6 +11,7 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
+from app.cleaning import clean_input_text
 from app.router import route_task, strip_template_prefix
 from app.schemas import AgentState
 from app.skills import get_skill
@@ -59,7 +60,9 @@ def execute_node(state: AgentState) -> AgentState:
     skill = get_skill(state["task_type"])
     # 前端模板填充的指令前缀不参与抽取，只送正文
     body = strip_template_prefix(state.get("input_text", ""))
-    return skill.run({**state, "input_text": body})
+    # 数据清理：去除格式噪声（多余空格/空行/不可见字符/混合换行符）
+    cleaned = clean_input_text(body)
+    return skill.run({**state, "input_text": cleaned})
 
 
 def should_execute(state: AgentState) -> str:

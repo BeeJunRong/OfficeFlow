@@ -63,7 +63,7 @@ _DATE_PATTERNS = [
     # 2026年10月9日 / 2026-10-09 / 2026/10/9（完整年月日）
     (re.compile(r"\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?"), "ymd"),
     # 10月9日（无年份，结合会议年份或当前年补全）
-    (re.compile(r"(?<!\d)\d{1,2}月\d{1,2}日(?!\d)"), "md"),
+    (re.compile(r"(?<!\d)\d{1,2}月\d{1,2}\s*日(?!\d)"), "md"),
 ]
 
 _DECISION_HINT_RE = re.compile(r"(决定|决议|商定|一致同意|通过|暂缓了?|同意)")
@@ -71,7 +71,7 @@ _DECISION_NEGATION_RE = re.compile(r"(没有|未|无)[^，。；]{0,8}(决定|�
 
 _TODO_HINTS = (
     "负责", "完成", "跟进", "落实", "推进", "执行", "准备", "编写", "提交",
-    "整理", "调研", "开发", "测试", "标注", "制作", "修改", "完善",
+    "整理", "调研", "开发", "测试", "标注", "制作", "修改", "完善", "补充",
 )
 _TODO_MARKER_RE = re.compile(r"(?<!没有)(?<!未)(?<!无)(待办|行动项)")
 _TODO_NEGATION_RE = re.compile(r"(没有|未|无)[^，。；]{0,6}(待办|行动项|需要|负责)")
@@ -170,15 +170,19 @@ _MARKER_RE = re.compile(r"^(待办|行动项|事项)[：:，,、]?")
 _LEADING_FILLERS = re.compile(r"^(请|需要|务必|按时|由|在|于)+")
 # "前完成X" → "X"：截止助词 + 前导动词一起剥（"前"单独出现不剥，避免误伤"前端"）
 _VERB_PREFIX_RE = re.compile(
-    r"^(?:前|以前|日前|之内|内)?(完成|提交|编写|准备|整理|负责|跟进|推进|落实)"
+    r"^(?:前|以前|日前|之内|内)?(完成|提交|编写|准备|整理|负责|跟进|推进|落实|接入|补充)"
 )
-_LEADING_VERBS = ("完成", "提交", "编写", "准备", "整理", "负责", "跟进", "推进", "落实")
+_LEADING_VERBS = (
+    "完成", "提交", "编写", "准备", "整理", "负责", "跟进", "推进", "落实"
+)
 _TRAILING_CLAUSES = (
     "，未约定完成日期", "，无截止日期", "，负责人待定", "，时间待定",
     "，具体日期待定", "，未指定负责人", "，具体时间待定",
 )
 _TRAILING_FILLERS = re.compile(r"(由|于|在|的|前|以前|日前|之)+$")
-_TRAILING_VERBS_RE = re.compile(r"(负责|完成|提交|编写|准备|整理|跟进|推进|落实)+$")
+_TRAILING_VERBS_RE = re.compile(
+    r"(负责|完成|提交|编写|准备|整理|跟进|推进|落实|补充)+$"
+)
 
 _PUNCT_RE = re.compile(r"^[，,。；;、：:\s]+|[，,。；;、：:\s]+$")
 
@@ -226,10 +230,15 @@ def _split_sentences(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def _normalize_date_breaks(text: str) -> str:
+    """Keep line-wrapped Chinese dates together for extraction."""
+    return re.sub(r"(\d{1,2}月\d{1,2})\s+日", r"\1日", text)
+
+
 _TODO_CLAUSE_SEPARATOR_RE = re.compile(
-    r"[，,]\s*(?=[一-龥]{2,4}在"
+    r"[，,]\s*(?=[一-龥]{2,4}(?:负责)?\s*在\s*"
     r"(?:\d{1,4}[年/-])?\d{1,2}[月/-]\d{1,2}日?前"
-    r"(?:完成|提交|编写|准备|整理|负责|跟进|推进|落实|开发|测试|制作|修改|完善))"
+    r"(?:完成|提交|编写|准备|整理|负责|跟进|推进|落实|开发|测试|制作|修改|完善|接入))"
 )
 
 
@@ -287,13 +296,14 @@ def rule_based_extract(text: str) -> MeetingMinutes:
     - "待办：10月20日前完成原型设计，负责人待定。"（缺负责人）
     - "没有形成明确决定，也没有具体待办。"（全缺失）
     """
-    dates = _find_dates(text)
+    normalized_text = _normalize_date_breaks(text)
+    dates = _find_dates(normalized_text)
     meeting_date = dates[0][0] if dates else PENDING
     meeting_year = dates[0][2] if dates else None
 
     # 主题：剥掉日期后的"XX例会/会议"短语
     topic = PENDING
-    topic_m = _TOPIC_RE.search(_strip_dates(text))
+    topic_m = _TOPIC_RE.search(_strip_dates(normalized_text))
     if topic_m:
         topic = topic_m.group(0)
 
@@ -303,7 +313,7 @@ def rule_based_extract(text: str) -> MeetingMinutes:
 
     sentences = [
         clause
-        for sentence in _split_sentences(text)
+        for sentence in _split_sentences(normalized_text)
         for clause in _split_todo_clauses(sentence)
     ]
     for idx, sent in enumerate(sentences):
@@ -370,25 +380,25 @@ def rule_based_extract(text: str) -> MeetingMinutes:
     # ---- 标准模板元信息：标签优先 → 隐式模式，缺省"待确认" ----
     meta: dict[str, str] = {}
     for key, pattern in _META_LABELS.items():
-        m = pattern.search(text)
+        m = pattern.search(normalized_text)
         if m:
             meta[key] = m.group(1).strip()
     if "location" not in meta:
-        m = _IMPLICIT_LOCATION_RE.search(text)
+        m = _IMPLICIT_LOCATION_RE.search(normalized_text)
         if m:
             meta["location"] = m.group(1)
     if "host" not in meta:
-        m = _IMPLICIT_HOST_RE.search(text)
+        m = _IMPLICIT_HOST_RE.search(normalized_text)
         if m:
             meta["host"] = m.group(1)
     if "recorder" not in meta:
-        m = _IMPLICIT_RECORDER_RE.search(text)
+        m = _IMPLICIT_RECORDER_RE.search(normalized_text)
         if m:
             meta["recorder"] = m.group(1)
 
     people: dict[str, list[str]] = {}
     for key, pattern in _PEOPLE_LABELS.items():
-        m = pattern.search(text)
+        m = pattern.search(normalized_text)
         if m:
             people[key] = _split_people(m.group(1))
     if "attendees" not in people:
@@ -398,7 +408,7 @@ def rule_based_extract(text: str) -> MeetingMinutes:
 
     # 议题：标签列表
     agenda: list[str] = []
-    m = _AGENDA_LABEL.search(text)
+    m = _AGENDA_LABEL.search(normalized_text)
     if m:
         agenda = [
             a.strip(" ，。,；;")
@@ -439,7 +449,7 @@ def rule_based_extract(text: str) -> MeetingMinutes:
         ("location", _NEXT_LOCATION_RE),
         ("agenda", _NEXT_AGENDA_RE),
     ):
-        m = pattern.search(text)
+        m = pattern.search(normalized_text)
         if m:
             next_meeting[key] = m.group(1).strip("，。；、")
 
