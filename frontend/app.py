@@ -32,7 +32,7 @@ from composer import chat_composer  # noqa: E402
 
 load_env()
 
-BACKEND = os.getenv("OFFICEFLOW_BACKEND", "http://localhost:8001")
+BACKEND = os.getenv("OFFICEFLOW_BACKEND", "http://localhost:8888")
 
 TASKS = [
     ("会议纪要", "meeting_minutes"),
