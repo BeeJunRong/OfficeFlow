@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: OfficeFlow API
   description: 任务型 AI Agent 办公信息整理助手 API，首版完整实现会议纪要 Skill。
-  version: 1.1.0
+  version: 1.6.0
   contact:
     name: 组号15
 servers:
@@ -104,6 +104,123 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StatusResponse'
+
+  /api/derive:
+    post:
+      summary: 派生下游任务（FR-06）
+      description: 基于已有会话产物派生下游任务，复用源结构化结果，不重新抽取。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeriveRequest'
+      responses:
+        '200':
+          description: 派生成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateResponse'
+        '400':
+          description: 不支持的派生方向
+        '404':
+          description: 源会话不存在
+        '409':
+          description: 源会话无可复用结果
+
+  /api/email/send:
+    post:
+      summary: 显式发送邮件（Q-02：必须用户点击触发）
+      description: 默认协议 draft_only 只返回预览；真实发送需四重闸门（显式点击 + confirm=true + SMTP 配置齐全 + 总开关=1）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailSendRequest'
+      responses:
+        '200':
+          description: 处理完成（含 preview/sent/skipped/failed 逐封结果）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailSendResponse'
+
+  /api/email/protocols:
+    get:
+      summary: 协议清单与 SMTP 可用性
+      description: 前端展示用：可用发送协议、当前协议能力与能否真实发送。
+      responses:
+        '200':
+          description: 协议清单
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProtocolsResponse'
+
+  /api/download:
+    get:
+      summary: 下载导出的 .md 文件
+      description: 仅限 exports 目录内，防路径穿越。
+      parameters:
+        - name: file_path
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 文件流
+        '403':
+          description: 非法文件路径
+        '404':
+          description: 文件不存在
+
+  /api/config:
+    get:
+      summary: 读取配置（密钥掩码，绝不回传明文）
+      responses:
+        '200':
+          description: 当前配置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigView'
+    post:
+      summary: 保存配置到 .env
+      description: 白名单外的键会被拒绝；空值视为未修改；模型配置写入后重置 LLM 单例。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigUpdateRequest'
+      responses:
+        '200':
+          description: 保存成功（含需重启项）
+        '400':
+          description: 白名单外键或类型校验失败
+
+  /api/config/test:
+    post:
+      summary: 测试模型连通性（可传未保存的值，先测再存）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigTestRequest'
+      responses:
+        '200':
+          description: 测试结果
+
+  /api/health:
+    get:
+      summary: 健康检查
+      responses:
+        '200':
+          description: 服务正常
 
 components:
   schemas:
@@ -238,3 +355,194 @@ components:
           type: string
         retryable:
           type: boolean
+
+    DeriveRequest:
+      type: object
+      required:
+        - session_id
+        - task_type
+      properties:
+        session_id:
+          type: string
+          description: 源会话 ID
+        task_type:
+          type: string
+          enum: [weekly_report, email_draft]
+          description: 派生目标任务类型
+
+    EmailSendRequest:
+      type: object
+      required:
+        - protocol
+        - sender
+        - subject
+        - recipients
+      properties:
+        session_id:
+          type: string
+        protocol:
+          type: string
+          enum: [draft_only, mailto, smtp]
+          default: draft_only
+        sender:
+          type: string
+        subject:
+          type: string
+        recipients:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmailRecipient'
+        confirm:
+          type: boolean
+          default: false
+          description: 显式确认发送（四重闸门第 2 重）
+
+    EmailRecipient:
+      type: object
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          description: 用户手填，系统绝不推测或拼接
+        content:
+          type: string
+        send:
+          type: boolean
+          default: false
+          description: 是否勾选发送这封
+
+    EmailSendResult:
+      type: object
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+        status:
+          type: string
+          enum: [sent, preview, skipped, failed]
+        detail:
+          type: string
+
+    EmailSendResponse:
+      type: object
+      properties:
+        protocol:
+          type: string
+        dry_run:
+          type: boolean
+          description: true=未真实发送（preview/skipped/failed）
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmailSendResult'
+        error_message:
+          type: string
+
+    ProtocolsResponse:
+      type: object
+      properties:
+        default:
+          type: string
+        protocols:
+          type: array
+          items:
+            type: object
+            properties:
+              value:
+                type: string
+              label:
+                type: string
+        smtp_available:
+          type: boolean
+        smtp_enabled:
+          type: boolean
+        smtp_missing:
+          type: array
+          items:
+            type: string
+        note:
+          type: string
+
+    ConfigView:
+      type: object
+      description: 当前配置视图（密钥已掩码）
+
+    ConfigUpdateRequest:
+      type: object
+      properties:
+        updates:
+          type: object
+          description: 键值对（仅白名单内 16 个键可写）
+        clear:
+          type: array
+          items:
+            type: string
+          description: 显式清空的键
+
+    ConfigTestRequest:
+      type: object
+      properties:
+        base_url:
+          type: string
+        api_key:
+          type: string
+        model_name:
+          type: string
+        timeout:
+          type: integer
+          default: 15
+
+    WebSummary:
+      type: object
+      properties:
+        url:
+          type: string
+        title:
+          type: string
+        key_points:
+          type: array
+          items:
+            type: string
+          description: 3-6 条摘自原文段落的要点
+
+    WeeklyReport:
+      type: object
+      properties:
+        period:
+          type: string
+        progress:
+          type: array
+          items:
+            type: string
+        plans:
+          type: array
+          items:
+            type: string
+        risks:
+          type: array
+          items:
+            type: string
+
+    EmailDraft:
+      type: object
+      properties:
+        sender:
+          type: string
+        subject:
+          type: string
+        recipients:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmailRecipient'
+
+    DerivedTask:
+      type: object
+      properties:
+        task_type:
+          type: string
+        label:
+          type: string
+        reason:
+          type: string

@@ -4,12 +4,12 @@
 
 - 采用 **单 Agent + 多工具** 架构，避免多智能体带来的开发与验收复杂度。
 - 首版入口为 **统一搜索框**，下方提供四个任务提示按钮：会议纪要、周报整理、邮件草稿、网页整理。
-- 首版 **只完整实现会议纪要 Skill（FR-01）**，其余三个 Skill 仅提供提示按钮与模板填充，生成结果返回“P1 开发中”。
+- 首版 **只完整实现会议纪要 Skill（FR-01）**，其余三个 Skill 仅提供提示按钮与模板填充，生成结果返回“P1 开发中”。v1.6.0 起 **四个 Skill 均为完整实现，已无 P1 占位**（v1.4.0 起周报/邮件转正式，v1.6.0 合并网页整理）。
 - 支持 **显式点击优先 + 指令区关键词 + LLM 意图分类兜底** 的分层路由；正文关键词不触发路由。
 - 所有生成结果可编辑，缺失字段统一显示“待确认”，不得编造。
 - 导出以用户显式点击为触发；邮件仅生成草稿，不自动发送。
 - 工具失败时明确报错、保留内容、支持重试。
-- 首版不引入数据库；可选 SQLite 仅记录工具日志，作为验收证据。
+- v1.1.0 起引入 SQLite 工具日志（`officeflow_logs.db`），仅记录验收证据，不参与核心生成流程。
 
 ---
 
@@ -26,9 +26,16 @@
 │              后端 API                         │
 │   FastAPI                                    │
 │   · POST /api/generate  触发纪要生成          │
+│   · POST /api/derive    派生下游任务（FR-06） │
+│   · POST /api/email/send  显式发送邮件        │
 │   · POST /api/export    导出 Markdown        │
 │   · POST /api/retry     重试失败操作          │
 │   · GET  /api/status/{id}  查询工具状态       │
+│   · GET  /api/download  下载导出文件          │
+│   · GET  /api/email/protocols  协议清单       │
+│   · GET/POST /api/config  读取/保存配置       │
+│   · POST /api/config/test  测试模型连通性     │
+│   · GET  /api/health  健康检查                │
 ├─────────────────────────────────────────────┤
 │            Agent 编排层                       │
 │   LangGraph + LangChain                       │
@@ -78,18 +85,25 @@
 
 回归测试见 `tests/test_composer.py`（挂载位置与组件 ID）和 `tests/frontend/composer.test.mjs`（连续发送时序、DOM 复用及草稿保留）。视觉验收见[评测计划 §12](评测计划.md#12-输入框交互与过渡回归fr-05)。
 
+### 3.3 派生 Skill 设计（FR-02 / FR-03 / FR-04）
+
+v1.6.0 起四个 Skill 均为完整实现，无 P1 占位。各 Skill 的设计要点：
+
+- **FR-02 周报整理**（v1.4.0 起正式实现）：由会议纪要派生。决定 → 本周进展；待办 → 下周计划；负责人/截止日期缺失的条目进"风险与待确认"清单；计划条目保留原文 evidence。
+- **FR-03 邮件草稿**（v1.4.0 起正式实现，默认不发送）：由会议纪要派生。发件人（本人）+ 发送协议 + 收件人列表；收件人**由纪要中的负责人去重生成**，姓名旁边是**用户手填的邮箱**与生成的内容，逐封独立"发送"开关。发送协议：`draft_only`（默认，只出草稿）/ `mailto` / `smtp`（四重闸门后才行）。详见 [guardrails §1.1](guardrails.md#11-邮件发送协议fr-03v140-新增)。
+- **FR-04 网页整理**（v1.6.0 合并起正式实现；**不参与派生**，因需 URL 作输入）：粘贴含单个 URL 的请求 → 单页读取（**不批量爬取、不登录**，检出登录表单直接拒绝）→ 提炼 3-6 条**摘自原文段落**的要点 → 可编辑 → 导出 `.md`。详见 [guardrails §7](guardrails.md#7-排除项首版不做)。
+
 ---
 
 ## 4. 后端设计
 
 ### 4.1 API 端点
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/generate` | 输入文本与任务类型，返回结构化纪要 |
-| POST | `/api/export` | 接收编辑后的内容，生成 `.md` 文件并返回下载链接或文件流 |
-| POST | `/api/retry` | 重试上一次失败的导出操作 |
-| GET | `/api/status/{session_id}` | 查询当前会话的工具调用状态 |
+| 方法 | 路径 | 说明 | 引入版本 |
+|------|------|------|----------|
+| POST | `/api/generate` | 输入文本与任务类型，返回结构化纪要 | v1.1.0 |
+| POST | `/api/derive` | 基于已有会话派生下游任务（复用源产物，不重抽） | v1.4.0 |
+| POST | `/api/email/send` | 显式发送邮件（四重闸门，默认 draft
 
 ### 4.2 Skill 路由分层
 
@@ -112,10 +126,10 @@
 
 ```python
 SKILLS = {
-    "meeting_minutes": MeetingMinutesSkill(),   # 完整实现
-    "weekly_report": PlaceholderSkill("周报整理"),
-    "email_draft": PlaceholderSkill("邮件草稿"),
-    "web_summary": PlaceholderSkill("网页整理"),
+    "meeting_minutes": MeetingMinutesSkill(),   # v1.1.0 完整实现
+    "weekly_report": WeeklyReportSkill(),       # v1.4.0 起正式实现
+    "email_draft": EmailDraftSkill(),           # v1.4.0 起正式实现
+    "web_summary": WebSummarySkill(),           # v1.6.0 合并引入
 }
 ```
 
@@ -126,7 +140,7 @@ SKILLS = {
 - 工具列表
 - 验收样本
 
-首版仅 `meeting_minutes` 完整实现。
+v1.6.0 起四个 Skill 均完整实现，无 P1 占位。
 
 ---
 
@@ -135,41 +149,50 @@ SKILLS = {
 ```text
 [入口]
   ↓
-[路由节点]
+[路由节点 route]
   ↓
-若 task_type = meeting_minutes
-  ↓
-[解析节点] → [抽取节点] → [校验节点]
-  ↓
-[缺失值填充] → [生成 Markdown] → [导出节点]
-  ↓
-若导出失败 → [异常处理节点] → 可重试
+  ├─ needs_clarification=true → END（追问用户选择任务类型）
+  └─ needs_clarification=false
+       ↓
+     [执行节点 execute]
+       ↓
+       ├─ 调用对应 Skill（meeting_minutes / weekly_report / email_draft / web_summary）
+       │   ├─ clean_input_text（输入数据清理，v1.7.0 新增）
+       │   ├─ extract_fields（结构化抽取，三级降级 langextract→llm→rule）
+       │   ├─ validate（零编造校验）
+       │   └─ render_markdown
+       └─ END
 ```
+
+**导出/重试不走图**，由 API 层显式触发（Q-02：导出必须用户点击）。
 
 ### 5.1 节点职责
 
 | 节点 | 职责 |
 |------|------|
-| 路由节点 | 根据显式任务类型、指令区关键词、LLM 分类确定 `task_type` |
-| 解析节点 | 接收原始文本，调用 LLM 提取会议日期、主题、决定、待办 |
-| 抽取节点 | 使用 Pydantic 结构化输出，强制字段格式 |
-| 校验节点 | 检查是否编造负责人或日期；若原文无日期但输出具体日期，回退为“待确认” |
-| 缺失值填充 | 对未提供字段统一填“待确认” |
-| 生成 Markdown | 将结构化数据转为 Markdown 文本 |
-| 导出节点 | 调用导出工具，返回成功/失败状态 |
-| 异常处理节点 | 记录失败步骤、保留内容、提供重试入口 |
+| 路由节点 route | FR-00 分层路由：显式任务类型 → 指令区关键词 → LLM 分类兜底；确定 `task_type` 或返回追问。路由结果记入工具日志。 |
+| 执行节点 execute | 分发到对应 Skill；先调用 `clean_input_text` 清理输入格式噪声，再由 Skill 完成抽取→校验→渲染。低置信度时直接返回追问。 |
+
+**导出/重试**由 API 层（`/api/export`、`/api/retry`）显式触发，独立于图。**派生**由 `/api/derive` 触发，复用源会话结构化结果，不重新抽取。
 
 ### 5.2 状态字段（建议）
 
 ```python
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     session_id: str
     task_type: str
+    routed_by: str
+    needs_clarification: bool
     input_text: str
-    structured_result: dict
+    structured_result: dict[str, Any]
+    email_draft: dict[str, Any]
+    weekly_report: dict[str, Any]
+    derived_tasks: list[dict[str, Any]]
+    derived_from: str
+    markdown: str
     edited_content: str
-    tool_logs: list
-    export_status: str
+    tool_logs: list[dict[str, Any]]
+    export_status: str  # pending / success / failed
     error_message: str
 ```
 
@@ -179,9 +202,12 @@ class AgentState(TypedDict):
 
 | 工具 | 输入 | 输出 | 错误处理 |
 |------|------|------|----------|
-| 网页读取 | URL | 正文、标题、来源 URL | 抓取失败返回错误码 |
-| 结构化抽取 | 会议文本 | `MeetingMinutes` JSON | 解析失败返回错误 |
-| Markdown 导出 | 文本内容 | 文件路径或文件流 | 保存失败返回错误码，支持重试 |
+| 网页读取 (web_fetch) | URL | 正文、标题、来源 URL | 抓取失败返回错误码；登录页直接拒绝；单页上限 512KB |
+| 结构化抽取 (extract_fields) | 会议文本 | `MeetingMinutes` JSON | 三级降级 langextract → llm → rule；无 Key 时规则引擎离线 |
+| LangExtract 抽取 (langextract_extract) | 会议文本 | `MeetingMinutes` + char_interval 溯源 | 中文用 UnicodeTokenizer；char_interval is None 一律丢弃 |
+| 邮件发送 (email_send) | 协议 + 收件人 | 逐封发送结果（sent/preview/skipped/failed） | 四重闸门，默认 draft_only；未配置时明确报错不谎报 |
+| Markdown 导出 (export_markdown) | 文本内容 | 文件路径或文件流 | 保存失败返回错误码，支持重试；受控失败注入用于测试 |
+| 输入数据清理 (cleaning) | 原始文本 | 清理后文本 | 保留原文实体字符串，确保零编造校验仍能匹配 |
 
 ### 6.1 工具调用日志
 
@@ -200,7 +226,7 @@ class AgentState(TypedDict):
 
 ---
 
-## 7. 数据模型（Pydantic 建议）
+## 7. 数据模型（Pydantic）
 
 ```python
 from pydantic import BaseModel, Field
@@ -216,7 +242,36 @@ class MeetingMinutes(BaseModel):
     topic: str = Field(default="待确认", description="会议主题")
     decisions: list[str] = Field(default_factory=list, description="关键决定")
     action_items: list[ActionItem] = Field(default_factory=list, description="待办列表")
+
+class WebSummary(BaseModel):
+    url: str
+    title: str
+    key_points: list[str]  # 3-6 条摘自原文段落的要点
+
+class WeeklyReport(BaseModel):
+    period: str
+    progress: list[str]
+    plans: list[str]
+    risks: list[str]
+
+class EmailRecipient(BaseModel):
+    name: str
+    email: str  # 用户手填，系统绝不推测或拼接
+    content: str
+    send: bool = False  # 是否勾选发送这封
+
+class EmailDraft(BaseModel):
+    sender: str
+    subject: str
+    recipients: list[EmailRecipient]
+
+class DerivedTask(BaseModel):
+    task_type: str
+    label: str
+    reason: str
 ```
+
+其余请求/响应模型（`GenerateRequest`/`GenerateResponse`/`DeriveRequest`/`EmailSendRequest`/`EmailSendResponse`/`ConfigUpdateRequest`/`ConfigTestRequest` 等）详见 `app/schemas.py`。
 
 ### 7.1 缺失值与零编造规则
 
@@ -228,17 +283,18 @@ class MeetingMinutes(BaseModel):
 
 ---
 
-## 8. 数据库（可选）
+## 8. 数据库（SQLite 工具日志）
 
-首版不引入数据库。若需保存工具日志作为验收证据，可使用 SQLite 轻量记录：
+v1.1.0 起引入 SQLite 工具日志（`officeflow_logs.db`），仅记录验收证据，不参与核心生成流程：
 
 | 表 | 字段 |
 |----|------|
 | `sessions` | `session_id`, `task_type`, `input_text`, `created_at` |
 | `results` | `session_id`, `structured_output`, `edited_output`, `export_status` |
-| `tool_logs` | `session_id`, `tool_name`, `status`, `error_message`, `timestamp` |
+| `tool_logs` | `id`, `session_id`, `tool_name`, `status`, `error_message`, `timestamp` |
+| `export_records` | `id`, `session_id`, `file_path`, `status`, `error_message`, `timestamp` |
 
-数据库仅用于日志和证据，不参与核心生成流程。
+数据库仅用于日志和证据，不参与核心生成流程。同一会话重试成功后仅保留一条成功导出记录（E1 无重复记录要求）。
 
 ---
 
@@ -276,7 +332,7 @@ class MeetingMinutes(BaseModel):
 pip install -r requirements.txt
 
 # 配置环境变量
-export MODEL_API_KEY="your_key"
+export OFFICEFLOW_MODEL_API_KEY="your_key"
 
 # 启动后端
 uvicorn app.main:app --reload
@@ -290,30 +346,63 @@ streamlit run frontend/app.py
 ```text
 officeflow/
 ├── app/
-│   ├── main.py              # FastAPI 入口
-│   ├── graph.py             # LangGraph 工作流
+│   ├── main.py              # FastAPI 入口（generate/derive/email·send/config/export/retry/status/download/health）
+│   ├── env.py               # .env 加载器（必须在业务 import 前调用）
+│   ├── config_store.py      # Web 配置面板后端：字段白名单、掩码回显、写 .env、连通性测试
+│   ├── graph.py             # LangGraph 工作流（route → execute）
+│   ├── router.py            # FR-00 分层路由 + 模板前缀剥离
+│   ├── derive.py            # FR-06 派生规则（只给有依据的方向）
+│   ├── cleaning.py          # 输入数据清理（v1.7.0 新增：统一换行/去不可见字符/压缩空白）
+│   ├── schemas.py           # Pydantic 模型（MeetingMinutes/WeeklyReport/EmailDraft/WebSummary/AgentState 等）
+│   ├── validate.py          # 零编造校验（无依据日期/负责人回退"待确认"）
+│   ├── llm.py               # OpenAI 兼容 LLM 客户端
+│   ├── storage.py           # SQLite 工具日志（验收证据）+ 派生时取回源产物
 │   ├── skills/
-│   │   ├── meeting_minutes.py
-│   │   └── placeholders.py  # P1 占位 Skill
-│   ├── tools/
-│   │   ├── extract_fields.py
-│   │   └── export_markdown.py
-│   ├── schemas.py           # Pydantic 模型
-│   └── router.py            # Skill 路由
+│   │   ├── base.py              # Skill 基类
+│   │   ├── meeting_minutes.py   # FR-01 会议纪要
+│   │   ├── weekly_report.py     # FR-02 周报整理（v1.4.0 起正式实现）
+│   │   ├── email_draft.py       # FR-03 邮件草稿（v1.4.0 起正式实现）
+│   │   └── web_summary.py       # FR-04 网页整理（v1.6.0 合并引入）
+│   └── tools/
+│       ├── extract_fields.py       # 抽取入口：langextract → llm → rule 三级降级
+│       ├── langextract_extract.py  # LangExtract 抽取 + char_interval 溯源
+│       ├── web_fetch.py            # 网页单页抓取 + 正文抽取 + 登录页拒绝（FR-04）
+│       ├── email_send.py           # 发送协议 draft_only/mailto/smtp + 四重闸门（Q-02）
+│       └── export_markdown.py      # 纪要/邮件/周报的 Markdown 渲染与导出
 ├── frontend/
-│   ├── app.py               # Streamlit 页面与业务调用
-│   ├── composer.py          # Components v2 输入组件注册
-│   └── composer_assets/    # 输入组件 HTML / CSS / JavaScript
+│   ├── app.py               # Streamlit 工作台
+│   ├── composer.py          # Components v2 输入组件注册（v1.7.0 新增）
+│   ├── composer_assets/     # 输入组件 HTML / CSS / JavaScript
+│   └── env_loader.py        # 前端专用 .env 加载器
 ├── tests/
 │   ├── samples/             # 13 例合成样本
-│   └── test_fr01.py
+│   ├── test_fr01.py         # FR-01 验收
+│   ├── test_router.py       # FR-00 路由
+│   ├── test_export_retry.py # 导出/重试
+│   ├── test_multiskill.py   # FR-06 多 Skill 派生
+│   ├── test_web_summary.py  # FR-04 网页整理
+│   ├── test_config.py       # Web 配置面板
+│   ├── test_cleaning.py     # 输入数据清理（v1.7.0 新增）
+│   ├── test_composer.py     # 输入框挂载位置回归（v1.7.0 新增）
+│   └── frontend/
+│       └── composer.test.mjs  # 输入框时序回归（v1.7.0 新增）
+├── scripts/
+│   ├── start.ps1                  # 一键启停/状态/自检/测试
+│   ├── check_langextract.py       # LangExtract 四步环境自检
+│   └── check_acceptance_live.py   # 真实 LLM 下的 13 例验收检查
 ├── docs/
 │   ├── architecture.md
 │   ├── api.yaml
-│   ├── guardsrails.md
-│   ├── evaluation_plan.md
-│   └── rtm.md
+│   ├── guardrails.md
+│   ├── 评测计划.md
+│   ├── 需求追溯矩阵.md
+│   ├── 版本.md
+│   ├── 部署与启动.md
+│   ├── 开源选型.md
+│   ├── 多Skill编排评估.md
+│   └── proposal.md
 ├── requirements.txt
+├── .env.example
 └── README.md
 ```
 
@@ -338,14 +427,13 @@ officeflow/
 
 ## 12. 待确认事项
 
-- 前端最终选型：Streamlit 或 React + agentkit-ui。
 - 模型服务与经费：DeepSeek / Qwen / Gemini / Ollama。
-- 是否引入 SQLite 日志表。
-- 是否集成真实邮箱（首版不做）。
 - 13 例基准样本和通过阈值。
 - P95 目标与 Q-03 路由准确率目标。
 - 实际分工中的交叉复核安排。
 - 成员姓名以小组实际为准（PDF OCR 存在不一致）。
+- N3 主题归一化差异：标准答案"产品评审"vs LLM"产品评审会议"（待团队决策）。
+- LangExtract 中文对齐实测（本机无 API Key，待配置后补测）。
 
 ---
 
@@ -354,4 +442,11 @@ officeflow/
 | 版本 | 日期 | 说明 |
 |------|------|------|
 | v1.1 | 2026-10-09 | 统一入口交互修订，新增 FR-00、T4、Q-03；FR-02～FR-04 降为 P1 占位 |
+| v1.1.0 | 2026-10-12 | FR-01 会议纪要最小可用版本（单 Agent + 多工具） |
+| v1.2.0 | 2026-10-13 | ChatGPT 风格对话式前端重构 |
+| v1.3.0 | 2026-10-13 | 开源选型 + LangExtract 部署与启动流程落地 |
+| v1.4.0 | 2026-10-14 | 多 Skill 编排（FR-06）+ 周报整理 + 邮件草稿 |
+| v1.5.0 | 2026-10-14 | Web 配置面板（选模型 + 填 Key，无需命令行） |
+| v1.6.0 | 2026-10-14 | 合并远程网页整理（FR-04）+ 修复登录页护栏与协办人语序 |
+| v1.7.0 | 2026-10-16（未发布） | 统一输入框与发送闪跳修复 + 输入数据清理模块（FR-DC） |
 | v2 | 待定 | 根据邻组互评修订 |

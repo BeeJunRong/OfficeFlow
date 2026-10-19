@@ -11,15 +11,15 @@
 - **FR-06 多 Skill 派生编排**：会议纪要完成后给出"可继续生成"建议，**用户点击才执行**，且复用源会话结果、不重新抽取。
 - **Web 配置面板**：页面最顶部右对齐的「⚙️」按钮——**选服务商 → 填 API Key → 测试连接 → 保存**，全程不用碰命令行；另含抽取引擎、邮件发送、文件路径等进阶项。
 
-**四个 Skill（FR-01/02/03/04）均为完整实现，已无 P1 占位**；FR-04 由 v0.6.0 合并引入（见 `docs/版本.md`）。
+**四个 Skill（FR-01/02/03/04）均为完整实现，已无 P1 占位**；FR-04 由 v1.6.0 合并引入（见 `docs/版本.md`）。
 
 ## 架构
 
 ```text
 前端工作台（Streamlit）  统一搜索框 · 四个提示按钮 · 结果编辑 · 工具状态面板 · 导出/重试
       ↓
-后端 API（FastAPI）      POST /api/generate · /api/derive · /api/email/send · /api/config
-                         POST /api/export · /api/retry · GET /api/status/{id}
+后端 API（FastAPI）      POST /api/generate · /api/derive · /api/email/send · /api/export · /api/retry · /api/config · /api/config/test
+                         GET /api/status/{id} · /api/download · /api/email/protocols · /api/config · /api/health
       ↓
 Agent 编排（LangGraph）  route → parse/extract → validate（零编造）→ 缺失值填充 → Markdown
       ↓

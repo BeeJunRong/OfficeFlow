@@ -184,7 +184,7 @@ def process_send(
             )
         return EmailSendResponse(protocol=protocol, dry_run=True, results=results)
 
-    # ---- smtp：真实发送需三重条件 ----
+    # ---- smtp：真实发送需四重闸门（显式点击由 API 端点保证 + confirm + SMTP 配置齐全 + 总开关=1）----
     cfg = smtp_config()
 
     if not cfg["available"]:

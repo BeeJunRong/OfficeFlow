@@ -63,8 +63,8 @@ class MeetingMinutes(BaseModel):
     attachments: list[str] = Field(default_factory=list, description="附件")
 
 
-# 注：v0.3 线曾在此定义过一套简版 WeeklyReport / EmailDraft（period+work_done、
-# subject+recipient+key_points）。v0.6 合并时按"本地 v0.4 设计为准"统一为本文件
+# 注：v1.3.0 线曾在此定义过一套简版 WeeklyReport / EmailDraft（period+work_done、
+# subject+recipient+key_points）。v1.6.0 合并时按"本地 v1.4.0 设计为准"统一为本文件
 # 后半部分的 EmailDraft / WeeklyReport（收件人列表 + 协议、进展/下周计划）。
 
 

@@ -324,7 +324,7 @@ def test_tool_logs_recorded():
 def test_all_skills_implemented_no_placeholder():
     """FR-02/03/04 均已实现：注册表中不再有占位 Skill。
 
-    v0.6 合并后 `app/skills/placeholders.py` 已删除（网页整理由 v0.3 线落地，
+    v1.6.0 合并后 `app/skills/placeholders.py` 已删除（网页整理由 v1.3.0 线落地，
     单页读取实现见 tests/test_web_summary.py）。
     """
     from app.skills import SKILLS
