@@ -27,7 +27,9 @@ test('clears before notifying Python, keeps nodes and docking across consecutive
   };
   const data = {epoch: 0, task: null, docked: false, busy: false, tasks: [['自动识别', null, '']]};
   const events = [];
-  const mount = () => render({parentElement: {querySelector: () => shell}, data: {...data}, setTriggerValue: (_, value) => events.push(value)});
+  // Host marker is what the outer page uses to dock the component as a flex item.
+  const parentElement = {querySelector: () => shell, dataset: {}};
+  const mount = () => render({parentElement, data: {...data}, setTriggerValue: (_, value) => events.push(value)});
   const flush = () => {const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(fn => fn());};
   let cleanup = mount();
   const originalChip = chips.children[0];
@@ -41,6 +43,7 @@ test('clears before notifying Python, keeps nodes and docking across consecutive
     assert.equal(send.disabled, true);
     flush();
     assert.equal(classes.has('docked'), true);
+    assert.equal(parentElement.dataset.docked, 'true');
     assert.equal(events.length, before);
     flush();
     assert.equal(events.at(-1).text, text);
@@ -64,6 +67,7 @@ test('clears before notifying Python, keeps nodes and docking across consecutive
   cleanup();
   cleanup = mount();
   assert.equal(classes.has('docked'), false);
+  assert.equal(parentElement.dataset.docked, 'false');
   assert.equal(input.value, '');
   cleanup();
 });
