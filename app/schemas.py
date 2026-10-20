@@ -340,7 +340,7 @@ class ConversationUpdateRequest(BaseModel):
 
 
 class AgentState(TypedDict, total=False):
-    """LangGraph 工作流状态（architecture.md §5.2）。"""
+    """LangGraph 工作流状态（architecture.md §5.2，ReAct 架构）。"""
 
     session_id: str
     task_type: str
@@ -357,3 +357,8 @@ class AgentState(TypedDict, total=False):
     tool_logs: list[dict[str, Any]]
     export_status: str  # pending / success / failed
     error_message: str
+    # ReAct 循环新增字段
+    react_messages: list[dict[str, Any]]  # OpenAI 多轮消息历史
+    react_iteration: int  # 当前迭代轮数
+    _react_fallback: bool  # 内部标记：LLM 不可用时走降级路径
+    _tool_context: dict[str, Any]  # 跨工具临时上下文（如 web_fetch 的 page）

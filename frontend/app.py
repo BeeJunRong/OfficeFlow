@@ -44,9 +44,17 @@ TASKS = [
 # 工具名 → 人话说明（前端过程展示用）
 TOOL_LABELS = {
     "route": "识别任务类型（Skill 路由）",
+    "react": "ReAct 推理循环（LLM 自主选择工具）",
     "extract_fields": "调用结构化抽取工具（日期/主题/决定/待办）",
     "validate": "调用零编造校验工具（无依据字段回退「待确认」）",
     "render_markdown": "调用 Markdown 生成工具",
+    "build_weekly_report": "由会议纪要派生周报",
+    "render_weekly": "调用周报 Markdown 生成工具",
+    "build_email_draft": "由纪要/周报派生邮件草稿",
+    "render_email": "调用邮件草稿 Markdown 生成工具",
+    "web_fetch": "调用网页读取工具",
+    "web_summarize": "调用网页要点提炼工具",
+    "render_web_summary": "调用网页整理 Markdown 生成工具",
     "export_markdown": "调用导出工具",
 }
 
