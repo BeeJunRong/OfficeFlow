@@ -313,8 +313,34 @@ class ConfigTestRequest(BaseModel):
     timeout: float = Field(default=20.0, description="超时秒数")
 
 
+class AuthRequest(BaseModel):
+    """POST /api/auth/register 与 /api/auth/login 请求体。"""
+
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class LogoutRequest(BaseModel):
+    """POST /api/auth/logout 请求体。"""
+
+    token: str
+
+
+class ConversationCreateRequest(BaseModel):
+    """POST /api/conversations 请求体。"""
+
+    title: str = Field(default="新对话", max_length=64)
+
+
+class ConversationUpdateRequest(BaseModel):
+    """PUT /api/conversations/{id} 请求体：标题与轮次均可选更新。"""
+
+    title: Optional[str] = Field(default=None, max_length=64)
+    turns: Optional[list[dict[str, Any]]] = None
+
+
 class AgentState(TypedDict, total=False):
-    """LangGraph 工作流状态（architecture.md §5.2）。"""
+    """LangGraph 工作流状态（architecture.md §5.2，ReAct 架构）。"""
 
     session_id: str
     task_type: str
@@ -331,3 +357,8 @@ class AgentState(TypedDict, total=False):
     tool_logs: list[dict[str, Any]]
     export_status: str  # pending / success / failed
     error_message: str
+    # ReAct 循环新增字段
+    react_messages: list[dict[str, Any]]  # OpenAI 多轮消息历史
+    react_iteration: int  # 当前迭代轮数
+    _react_fallback: bool  # 内部标记：LLM 不可用时走降级路径
+    _tool_context: dict[str, Any]  # 跨工具临时上下文（如 web_fetch 的 page）
