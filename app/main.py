@@ -24,16 +24,21 @@ from app.env import load_env
 
 load_env()
 
-from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi import FastAPI, Header, HTTPException  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 
+from app.auth import AuthError, get_auth_store  # noqa: E402
+from app.conversations import get_conv_store  # noqa: E402
 from app.derive import compute_derived_tasks  # noqa: E402
 from app.graph import run_workflow  # noqa: E402
 from app.schemas import (  # noqa: E402
     VALID_TASK_TYPES,
+    AuthRequest,
     ConfigTestRequest,
     ConfigUpdateRequest,
+    ConversationCreateRequest,
+    ConversationUpdateRequest,
     DeriveRequest,
     EmailDraft,
     EmailSendRequest,
@@ -42,6 +47,7 @@ from app.schemas import (  # noqa: E402
     ExportResponse,
     GenerateRequest,
     GenerateResponse,
+    LogoutRequest,
     MeetingMinutes,
     RetryRequest,
     ToolLog,
@@ -168,6 +174,98 @@ def _to_response(
 
 
 # ---------- 端点 ----------
+
+
+# ---------- 认证（登录/注册/登出） ----------
+
+
+def _auth_user(authorization: str) -> dict:
+    """从 Authorization: Bearer <token> 解析当前用户；无效抛 401。"""
+    token = authorization.removeprefix("Bearer ").strip()
+    user = get_auth_store().user_for_token(token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="未登录或登录已过期，请重新登录")
+    return user
+
+
+@app.post("/api/auth/register")
+def auth_register(req: AuthRequest) -> dict:
+    """注册新用户（用户名 2-32 字符、密码 ≥6 位；口令 PBKDF2 散列存储）。"""
+    try:
+        user = get_auth_store().register(req.username, req.password)
+    except AuthError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return {"ok": True, "username": user["username"]}
+
+
+@app.post("/api/auth/login")
+def auth_login(req: AuthRequest) -> dict:
+    """登录：校验口令后签发 7 天有效的 Bearer 令牌。"""
+    try:
+        user = get_auth_store().verify(req.username, req.password)
+    except AuthError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    token = get_auth_store().issue_token(user["id"])
+    return {"ok": True, "token": token, "username": user["username"]}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(req: LogoutRequest) -> dict:
+    """登出：吊销令牌。"""
+    get_auth_store().revoke_token(req.token)
+    return {"ok": True}
+
+
+# ---------- 对话管理（登录后，按用户隔离） ----------
+
+
+@app.get("/api/conversations")
+def list_conversations(authorization: str = Header(default="")) -> list[dict]:
+    """当前用户的对话列表（最近更新在前，不含轮次正文）。"""
+    user = _auth_user(authorization)
+    return get_conv_store().list(user["id"])
+
+
+@app.post("/api/conversations")
+def create_conversation(
+    req: ConversationCreateRequest, authorization: str = Header(default="")
+) -> dict:
+    """新建对话。"""
+    user = _auth_user(authorization)
+    return get_conv_store().create(user["id"], req.title)
+
+
+@app.get("/api/conversations/{conv_id}")
+def get_conversation(conv_id: str, authorization: str = Header(default="")) -> dict:
+    """取单个对话（含完整轮次），供切换对话时恢复。"""
+    user = _auth_user(authorization)
+    conv = get_conv_store().get(conv_id, user["id"])
+    if conv is None:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    return conv
+
+
+@app.put("/api/conversations/{conv_id}")
+def update_conversation(
+    conv_id: str,
+    req: ConversationUpdateRequest,
+    authorization: str = Header(default=""),
+) -> dict:
+    """更新对话标题和/或轮次（前端每次生成后整存整取）。"""
+    user = _auth_user(authorization)
+    conv = get_conv_store().update(conv_id, user["id"], req.title, req.turns)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    return conv
+
+
+@app.delete("/api/conversations/{conv_id}")
+def delete_conversation(conv_id: str, authorization: str = Header(default="")) -> dict:
+    """删除对话。"""
+    user = _auth_user(authorization)
+    if not get_conv_store().delete(conv_id, user["id"]):
+        raise HTTPException(status_code=404, detail="对话不存在")
+    return {"ok": True}
 
 
 @app.post("/api/generate", response_model=GenerateResponse)

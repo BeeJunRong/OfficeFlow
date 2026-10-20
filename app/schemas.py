@@ -313,6 +313,32 @@ class ConfigTestRequest(BaseModel):
     timeout: float = Field(default=20.0, description="超时秒数")
 
 
+class AuthRequest(BaseModel):
+    """POST /api/auth/register 与 /api/auth/login 请求体。"""
+
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class LogoutRequest(BaseModel):
+    """POST /api/auth/logout 请求体。"""
+
+    token: str
+
+
+class ConversationCreateRequest(BaseModel):
+    """POST /api/conversations 请求体。"""
+
+    title: str = Field(default="新对话", max_length=64)
+
+
+class ConversationUpdateRequest(BaseModel):
+    """PUT /api/conversations/{id} 请求体：标题与轮次均可选更新。"""
+
+    title: Optional[str] = Field(default=None, max_length=64)
+    turns: Optional[list[dict[str, Any]]] = None
+
+
 class AgentState(TypedDict, total=False):
     """LangGraph 工作流状态（architecture.md §5.2）。"""
 

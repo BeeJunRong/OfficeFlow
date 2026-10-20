@@ -77,10 +77,19 @@ st.markdown(
 
 # ---- 会话状态 ----
 ss = st.session_state
-ss.setdefault("turns", [])            # 每轮：{user, response, animated, export_result}
+ss.setdefault("turns", [])            # 当前对话每轮：{user, response, animated, export_result}
 ss.setdefault("locked_task_type", None)  # 显式点击锁定的任务类型
 ss.setdefault("composer_epoch", 0)
 ss.setdefault("pending_message", None)
+ss.setdefault("auth", None)           # {"token":..., "username":...} | None（未登录）
+ss.setdefault("convs_list", [])       # 侧边栏对话列表 [{id, title, updated_at}]
+ss.setdefault("active_conv", None)    # 当前对话 id；None = 未保存的新对话
+ss.setdefault("conv_scope", 0)        # widget key 作用域：切换对话后避免跨对话串状态
+
+
+def _wkey(base: str) -> str:
+    """对话级 widget key：切换/新建对话后前缀变化，避免旧对话的控件状态串入新对话。"""
+    return f"c{ss.conv_scope}_{base}"
 
 
 # ---- 后端调用 ----
@@ -212,6 +221,204 @@ def _protocol_options() -> list[dict]:
         {"value": "mailto", "label": "调用本机邮件客户端发送（mailto 链接）"},
         {"value": "smtp", "label": "由服务端 SMTP 直发（需配置，且每封需显式确认）"},
     ]
+
+
+# ---- 登录与对话管理 ----
+
+
+def _api_request(
+    method: str, path: str, json_body: dict | None = None, auth: bool = False
+) -> tuple[dict | list | None, str]:
+    """带可选令牌的通用请求；返回 (data, error_message)。"""
+    headers = {}
+    if auth and ss.get("auth"):
+        headers["Authorization"] = f"Bearer {ss.auth['token']}"
+    try:
+        resp = httpx.request(
+            method, f"{BACKEND}{path}", json=json_body, headers=headers, timeout=30
+        )
+    except httpx.HTTPError as exc:
+        return None, f"后端不可用：{exc}"
+    if resp.status_code == 401:
+        return None, "__unauthorized__"
+    try:
+        data = resp.json()
+    except ValueError:
+        return None, f"后端响应异常（HTTP {resp.status_code}）"
+    if resp.status_code >= 400:
+        detail = data.get("detail") if isinstance(data, dict) else data
+        return None, str(detail) if detail else f"请求失败（HTTP {resp.status_code}）"
+    return data, ""
+
+
+def _do_login(username: str, password: str) -> str:
+    """登录成功写入 ss.auth 并初始化对话列表；返回错误信息（空串=成功）。"""
+    data, err = _api_request(
+        "POST", "/api/auth/login", json_body={"username": username, "password": password}
+    )
+    if err == "__unauthorized__":
+        return "用户名或密码错误"
+    if err:
+        return err
+    if not data or not data.get("token"):
+        return "登录失败：后端未返回令牌"
+    ss.auth = {"token": data["token"], "username": data["username"]}
+    ss.turns = []
+    ss.active_conv = None
+    ss.convs_list = []
+    ss.locked_task_type = None
+    ss.conv_scope += 1
+    _refresh_conversations()
+    return ""
+
+
+def _render_login_page() -> None:
+    """登录/注册页：未登录时的唯一入口。"""
+    st.markdown(
+        "<div class='of-welcome'><h1>OfficeFlow</h1>"
+        "<p>把日常办公，交给一个对话框。</p></div>",
+        unsafe_allow_html=True,
+    )
+    _, card, _ = st.columns([1, 1.1, 1])
+    with card:
+        tab_login, tab_register = st.tabs(["登录", "注册"])
+        with tab_login:
+            username = st.text_input("用户名", key="li_user")
+            password = st.text_input("密码", type="password", key="li_pw")
+            if st.button("登录", type="primary", key="li_btn", use_container_width=True):
+                if not username.strip() or not password:
+                    st.error("请输入用户名和密码")
+                elif err := _do_login(username.strip(), password):
+                    st.error(err)
+                else:
+                    st.rerun()
+        with tab_register:
+            username = st.text_input("用户名（2-32 个字符）", key="rg_user")
+            password = st.text_input("密码（至少 6 位）", type="password", key="rg_pw")
+            confirm = st.text_input("确认密码", type="password", key="rg_pw2")
+            if st.button("注册并登录", type="primary", key="rg_btn", use_container_width=True):
+                if password != confirm:
+                    st.error("两次输入的密码不一致")
+                    return
+                data, err = _api_request(
+                    "POST",
+                    "/api/auth/register",
+                    json_body={"username": username.strip(), "password": password},
+                )
+                if err == "__unauthorized__":
+                    st.error("请求被拒绝")
+                elif err:
+                    st.error(err)
+                elif not data or not data.get("ok"):
+                    st.error("注册失败，请稍后重试")
+                elif err2 := _do_login(username.strip(), password):
+                    st.error(err2)
+                else:
+                    st.rerun()
+
+
+def _refresh_conversations() -> None:
+    """拉取当前用户的对话列表；登录失效时回到登录页。"""
+    data, err = _api_request("GET", "/api/conversations", auth=True)
+    if err == "__unauthorized__":
+        ss.auth = None
+        ss.convs_list = []
+        ss.active_conv = None
+        ss.turns = []
+        st.rerun()
+        return
+    ss.convs_list = data if isinstance(data, list) else []
+
+
+def _persist_current() -> None:
+    """把当前对话轮次持久化到后端；首条消息时才懒创建对话记录。"""
+    if not ss.get("auth"):
+        return
+    if ss.active_conv is None:
+        if not ss.turns:
+            return
+        first = (ss.turns[0].get("user") or "新对话").strip()
+        title = first[:18] + ("…" if len(first) > 18 else "")
+        conv, err = _api_request(
+            "POST", "/api/conversations", json_body={"title": title}, auth=True
+        )
+        if err or not conv:
+            return  # 后端暂不可用：内容仍在页面，下次交互会再尝试
+        ss.active_conv = conv["id"]
+    _api_request(
+        "PUT", f"/api/conversations/{ss.active_conv}", json_body={"turns": ss.turns}, auth=True
+    )
+    _refresh_conversations()
+
+
+def _switch_conversation(conv_id: str) -> None:
+    """切换对话：先保存当前对话，再加载目标对话的完整轮次。"""
+    _persist_current()
+    conv, err = _api_request("GET", f"/api/conversations/{conv_id}", auth=True)
+    if err or not conv:
+        st.error(f"对话加载失败：{err or '未找到'}")
+        return
+    ss.turns = conv.get("turns") or []
+    ss.active_conv = conv_id
+    ss.locked_task_type = None
+    ss.composer_epoch += 1  # 清空输入框草稿
+    ss.conv_scope += 1      # widget key 换作用域
+    st.rerun()
+
+
+def _new_conversation() -> None:
+    """新建对话：当前对话先落库，界面回到空白新对话。"""
+    _persist_current()
+    ss.turns = []
+    ss.active_conv = None
+    ss.locked_task_type = None
+    ss.composer_epoch += 1
+    ss.conv_scope += 1
+    st.rerun()
+
+
+def _logout() -> None:
+    """登出：保存当前对话、吊销令牌、清空本地会话状态。"""
+    _persist_current()
+    if ss.get("auth"):
+        _api_request("POST", "/api/auth/logout", json_body={"token": ss.auth["token"]})
+    ss.auth = None
+    ss.convs_list = []
+    ss.active_conv = None
+    ss.turns = []
+    ss.locked_task_type = None
+    ss.pending_message = None
+    ss.composer_epoch += 1
+    ss.conv_scope += 1
+    st.rerun()
+
+
+def _render_sidebar() -> None:
+    """左侧对话区：对话列表 + 新建 + 左下角登出。"""
+    with st.sidebar:
+        st.markdown("### 📋 OfficeFlow")
+        st.caption(f"👤 {ss.auth['username']}")
+        st.divider()
+        if st.button(
+            "＋ 新建对话", key="sb_new_conv", use_container_width=True, type="primary"
+        ):
+            _new_conversation()
+        st.caption("对话")
+        if not ss.convs_list:
+            st.caption("（暂无历史对话）")
+        for conv in ss.convs_list:
+            active = conv["id"] == ss.get("active_conv")
+            icon = "🟢" if active else "💬"
+            if st.button(
+                f"{icon} {conv['title']}",
+                key=f"sb_conv_{conv['id']}",
+                use_container_width=True,
+            ):
+                if not active:
+                    _switch_conversation(conv["id"])
+        st.divider()
+        if st.button("🚪 登出", key="sb_logout", use_container_width=True):
+            _logout()
 
 
 # ---- 组件 ----
@@ -969,57 +1176,61 @@ def _receive_message() -> None:
         ss.pending_message = event["text"].strip()
 
 
-# Mount before every conditional/dynamic element: a stable key alone does not
-# preserve a custom component when its Streamlit delta path changes.
-has_conversation = bool(ss.turns or ss.pending_message)
-prompts = {
-    "meeting_minutes": "请将以下会议记录整理成会议纪要：\n",
-    "weekly_report": "请将以下工作记录整理成周报：\n",
-    "email_draft": "请根据以下内容撰写邮件草稿：\n",
-    "web_summary": "请整理以下网页的内容：\n",
-}
-chat_composer(
-    key="message_composer",
-    data={
-        "docked": has_conversation,
-        "busy": bool(ss.pending_message),
-        "task": ss.locked_task_type,
-        "epoch": ss.composer_epoch,
-        "tasks": [(label, task, prompts[task]) for label, task in TASKS]
-        + [("自动识别", None, "")],
-    },
-    on_submitted_change=_receive_message,
-)
-
-_config_topbar()
-
-if not has_conversation:
-    st.markdown(
-        "<div class='of-welcome'><h1>OfficeFlow</h1>"
-        "<p>把日常办公，交给一个对话框。</p></div>"
-        "<style>.of-welcome {position:fixed;top:calc(50dvh - 165px);"
-        "left:0;width:100%;text-align:center;pointer-events:none;}"
-        ".of-welcome h1 {font-size:2rem;padding:0;}"
-        ".of-welcome p {opacity:.55;font-size:.95rem;}</style>",
-        unsafe_allow_html=True,
-    )
+# ---- 主流程：未登录 → 登录页；已登录 → 侧边栏 + 主区 ----
+if not ss.get("auth"):
+    _render_login_page()
 else:
-    tcol, ncol = st.columns([4, 1])
-    tcol.markdown("#### 📋 OfficeFlow")
-    if ncol.button("新建对话", use_container_width=True, disabled=bool(ss.pending_message)):
-        ss.turns = []
-        ss.locked_task_type = None
-        ss.composer_epoch += 1
-        st.rerun()
-    for idx in range(len(ss.turns)):
-        _render_turn(idx)
+    _render_sidebar()
+
+    # Mount before every conditional/dynamic element: a stable key alone does not
+    # preserve a custom component when its Streamlit delta path changes.
+    has_conversation = bool(ss.turns or ss.pending_message)
+    prompts = {
+        "meeting_minutes": "请将以下会议记录整理成会议纪要：\n",
+        "weekly_report": "请将以下工作记录整理成周报：\n",
+        "email_draft": "请根据以下内容撰写邮件草稿：\n",
+        "web_summary": "请整理以下网页的内容：\n",
+    }
+    chat_composer(
+        key="message_composer",
+        data={
+            "docked": has_conversation,
+            "busy": bool(ss.pending_message),
+            "task": ss.locked_task_type,
+            "epoch": ss.composer_epoch,
+            "tasks": [(label, task, prompts[task]) for label, task in TASKS]
+            + [("自动识别", None, "")],
+        },
+        on_submitted_change=_receive_message,
+    )
+
+    _config_topbar()
+
+    if not has_conversation:
+        st.markdown(
+            "<div class='of-welcome'><h1>OfficeFlow</h1>"
+            "<p>把日常办公，交给一个对话框。</p></div>"
+            "<style>.of-welcome {position:fixed;top:calc(50dvh - 165px);"
+            "left:0;width:100%;text-align:center;pointer-events:none;}"
+            ".of-welcome h1 {font-size:2rem;padding:0;}"
+            ".of-welcome p {opacity:.55;font-size:.95rem;}</style>",
+            unsafe_allow_html=True,
+        )
+    else:
+        tcol, ncol = st.columns([4, 1])
+        tcol.markdown("#### 📋 OfficeFlow")
+        if ncol.button(
+            "新建对话", use_container_width=True, disabled=bool(ss.pending_message)
+        ):
+            _new_conversation()
+        for idx in range(len(ss.turns)):
+            _render_turn(idx)
+        if ss.pending_message:
+            with st.chat_message("user"):
+                st.markdown(ss.pending_message)
+
     if ss.pending_message:
-        with st.chat_message("user"):
-            st.markdown(ss.pending_message)
-
-
-if ss.pending_message:
-    with st.spinner("正在整理内容…"):
-        _submit(ss.pending_message)
-    ss.pending_message = None
-    st.rerun()
+        with st.spinner("正在整理内容…"):
+            _submit(ss.pending_message)
+        ss.pending_message = None
+        st.rerun()
