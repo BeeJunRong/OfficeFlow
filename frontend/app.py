@@ -61,11 +61,16 @@ TOOL_LABELS = {
 st.set_page_config(page_title="OfficeFlow", page_icon="📋", layout="centered")
 
 # ---- 全局样式：隐藏 Streamlit 附件元素，接近 ChatGPT 的干净页面 ----
+# 外层「侧边栏 + 主体」以及主体内部的「对话区 + 底部输入区」使用 Flexbox
+# 重排，规则集中在 layout.css：260px 固定侧边栏、右侧自适应且不产生横向
+# 滚动条、对话区内部滚动、输入区固定贴底。
+_LAYOUT_CSS = (Path(__file__).with_name("layout.css")).read_text(encoding="utf-8")
+
 st.markdown(
-    """
-    <style>
+    "<style>\n"
+    + _LAYOUT_CSS
+    + """
       #MainMenu, footer, [data-testid="stStatusWidget"] {visibility: hidden;}
-      .block-container {padding-top: 2.5rem; padding-bottom: var(--of-composer-height, 220px); max-width: 760px;}
       [data-testid="stChatInput"] {max-width: 760px;}
       .of-center {text-align: center;}
       .of-sub {color: #888; text-align: center; margin-top: -0.5rem;}

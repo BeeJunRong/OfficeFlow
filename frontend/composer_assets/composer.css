@@ -8,6 +8,21 @@
   transition: transform 420ms cubic-bezier(.22, 1, .36, 1);
 }
 .composer-shell.docked {transform: translate(-50%, 0);}
+/* Docked: the shell becomes a normal block inside the conversation column.
+ * The outer page turns its element container into the last sticky flex item,
+ * so the composer shares the column's left/right edges and follows the
+ * sidebar's expand/collapse without any fixed-position offsets. */
+:host([data-docked="true"]) .composer-shell,
+.composer-shell.docked {
+  position: static;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  transform: none;
+  width: 100%;
+  z-index: auto;
+  transition: none;
+}
 .composer-card {background: var(--st-background-color, #fff); border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
   border-radius: 26px; padding: 16px 16px 12px; box-shadow: 0 6px 28px #0000000a;}
 .composer-card:focus-within {border-color: color-mix(in srgb, var(--st-primary-color, #ff4b4b) 60%, transparent);

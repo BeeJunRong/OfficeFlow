@@ -1,0 +1,149 @@
+/* OfficeFlow 外层布局：固定视口高度 + 左右 Flex 分栏 + 右侧上下分栏。
+ *
+ * Streamlit 自己会生成外层 DOM，这里只通过稳定的 data-testid 覆盖它的布局，
+ * 不修改 Streamlit 内部结构。核心规则对应设计稿：
+ *   1. 父容器 display:flex; width:100vw; height:100vh;
+ *   2. 左侧侧边栏 width:260px; flex-shrink:0;
+ *   3. 右侧主体 flex:1; min-width:0; 且自身为纵向 Flex 容器；
+ *   4. 对话/Agent 过程占据剩余高度并在内部滚动；
+ *   5. 底部输入区 flex-shrink:0，始终贴在主体底部。
+ */
+
+:root {
+  --of-sidebar-width: 260px;
+}
+
+/* ---- 1. 外层：左右并排，锁定视口，不产生横向滚动条 ---- */
+[data-testid="stAppViewContainer"] {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---- 2. 左侧侧边栏：固定 260px，禁止被压缩 ---- */
+/* Streamlit 1.65 的侧边栏是可拖拽面板，宽度同时写在包裹层和面板本身，
+ * 两处都要锁定，否则拖拽窗口时仍会被 flex 压缩。 */
+[data-testid="stAppViewContainer"]
+  > div:has([data-testid="stSidebar"][aria-expanded="true"]),
+[data-testid="stAppViewContainer"]
+  > [data-testid="stSidebar"][aria-expanded="true"] {
+  flex: 0 0 var(--of-sidebar-width) !important;
+  width: var(--of-sidebar-width) !important;
+  min-width: var(--of-sidebar-width) !important;
+  max-width: var(--of-sidebar-width) !important;
+}
+
+/* 只约束展开态，保留 Streamlit 自带的折叠按钮行为。 */
+[data-testid="stSidebar"][aria-expanded="true"] {
+  flex: 0 0 var(--of-sidebar-width) !important;
+  width: var(--of-sidebar-width) !important;
+  min-width: var(--of-sidebar-width) !important;
+  max-width: var(--of-sidebar-width) !important;
+}
+
+/* ---- 3. 右侧主体：吃掉剩余宽度；min-width:0 防止内容撑出横向滚动条 ---- */
+[data-testid="stAppViewContainer"] > div:has(> [data-testid="stMain"]) {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+[data-testid="stMain"] {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* stMain 与 block-container 之间还有一层 #Main 包裹，同样需要撑满高度，
+ * 否则 flex:1 的滚动区拿不到可分配高度。 */
+[data-testid="stMain"] > div:has(> [data-testid="stMainBlockContainer"]) {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ---- 4. 右侧主体内部：对话区占满剩余高度并在内部滚动 ---- */
+[data-testid="stMainBlockContainer"] {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  max-width: 760px;
+  margin-inline: auto;
+  padding-top: 2.5rem;
+  padding-bottom: 0 !important;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+/* Streamlit 把所有元素放在 block-container 内的根 stVerticalBlock 中。
+ * 让这个根容器成为纵向 Flex 列，才能把输入区排到最底部。 */
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 100%;
+  width: 100%;
+  min-width: 0;
+}
+
+/* 对话流中的每一块（消息、Agent 执行过程、结果卡片）都不参与压缩，
+ * 内容过高时由上面的容器统一滚动。 */
+[data-testid="stMainBlockContainer"]
+  > [data-testid="stVerticalBlock"]
+  > [data-testid="stElementContainer"] {
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+/* ---- 5. 底部输入区：作为纵向 Flex 的最后一项，不参与压缩 ---- */
+/* 组件挂载点在 DOM 中靠前（为了跨 rerun 保持同一个节点），
+ * 用 order + margin-top:auto 把它视觉上排到最底部，sticky 保证滚动时仍贴底。 */
+/* 输入组件开启了样式隔离（shadow DOM），页面 CSS 无法直接选中
+ * .composer-shell；组件 JS 会把 docked 状态写到 host 的 data-docked 上，
+ * 这里只需在外层把承载它的 element-container 变成最后一个 sticky Flex 项。 */
+[data-testid="stMainBlockContainer"]
+  > [data-testid="stVerticalBlock"]
+  > [data-testid="stElementContainer"]:has(
+    [data-testid^="stBidiComponent"][data-docked="true"]
+  ) {
+  order: 999 !important;
+  flex: 0 0 auto;
+  width: 100%;
+  margin-top: auto !important;
+  position: sticky !important;
+  bottom: 0;
+  z-index: 50;
+  background: var(--st-background-color, #fff);
+}
+
+/* 欢迎页标题与输入框一起对齐到右侧主体列，而不是整个窗口。 */
+[data-testid="stAppViewContainer"]:has(
+    [data-testid="stSidebar"][aria-expanded="true"]
+  )
+  .of-welcome {
+  left: var(--of-sidebar-width);
+  width: calc(100% - var(--of-sidebar-width));
+}
+
+/* host 默认 height:100%，会让 0 高度的容器把布局撑坏；交给内部 shell
+ * 决定高度。欢迎页的 fixed 输入框由组件 JS 依据对话列的实际位置居中，
+ * 侧边栏展开/折叠或窗口缩放时会重新计算（见 composer.js placeWelcome）。 */
+[data-testid="stBidiComponentIsolated"],
+[data-testid="stBidiComponentRegular"] {
+  display: block;
+  height: auto !important;
+  width: 100% !important;
+}
