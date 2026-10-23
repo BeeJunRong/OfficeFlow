@@ -49,7 +49,32 @@ def _validate_date(value: str, text: str, default_year: int) -> str:
     return PENDING  # 原文无依据 → 回退，不得编造
 
 
-def validate_minutes(minutes: MeetingMinutes, source_text: str) -> tuple[MeetingMinutes, list[str]]:
+def locate_line(source_text: str, snippet: str) -> int | None:
+    """定位证据片段在原文中的行号（1-based）；找不到返回 None。
+
+    先做精确子串匹配；失败后按"去除空白后包含"逐行兜底，
+    以兼容格式清理（FR-DC）造成的空白差异。
+    """
+    snippet = (snippet or "").strip()
+    if not source_text or not snippet:
+        return None
+    idx = source_text.find(snippet)
+    if idx >= 0:
+        return source_text.count("\n", 0, idx) + 1
+    compact = re.sub(r"\s+", "", snippet)
+    if not compact:
+        return None
+    for lineno, line in enumerate(source_text.splitlines(), start=1):
+        if compact in re.sub(r"\s+", "", line):
+            return lineno
+    return None
+
+
+def validate_minutes(
+    minutes: MeetingMinutes,
+    source_text: str,
+    line_source_text: str | None = None,
+) -> tuple[MeetingMinutes, list[str]]:
     """校验并修正结构化结果。
 
     返回 (修正后结果, 修正说明列表)；修正说明进入工具日志作为验收证据。
@@ -90,6 +115,9 @@ def validate_minutes(minutes: MeetingMinutes, source_text: str) -> tuple[Meeting
         elif names:
             updates[field] = kept
 
+    # 行号以原始输入为准（清理可能压缩空行，不能拿清理后的文本算行号）
+    line_source = line_source_text if line_source_text is not None else source_text
+
     items: list[ActionItem] = []
     for i, item in enumerate(minutes.action_items, start=1):
         owner = item.owner
@@ -103,8 +131,17 @@ def validate_minutes(minutes: MeetingMinutes, source_text: str) -> tuple[Meeting
         deadline = _validate_date(item.deadline, source_text, default_year)
         if deadline != item.deadline and item.deadline != PENDING:
             corrections.append(f"待办{i}截止日期「{item.deadline}」原文无依据，回退为待确认")
+        # 证据行号：优先定位证据片段，其次定位事项文本
+        evidence_line = locate_line(line_source, item.evidence or item.task)
         items.append(
-            item.model_copy(update={"owner": owner, "co_owner": co_owner, "deadline": deadline})
+            item.model_copy(
+                update={
+                    "owner": owner,
+                    "co_owner": co_owner,
+                    "deadline": deadline,
+                    "evidence_line": evidence_line if evidence_line is not None else item.evidence_line,
+                }
+            )
         )
     updates["action_items"] = items
 

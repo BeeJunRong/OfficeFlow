@@ -185,7 +185,9 @@ class EmailDraftSkill(Skill):
                 source_desc = "复用会议纪要结构化结果（派生）"
             else:
                 minutes, _engine = extract_meeting_minutes(text)
-                minutes, _corrections = validate_minutes(minutes, text)
+                minutes, _corrections = validate_minutes(
+                    minutes, text, line_source_text=state.get("raw_input_text")
+                )
                 topic, date_str = minutes.topic, minutes.date
                 recipients = recipients_from_minutes(minutes)
                 note = _pending_note_from_items(minutes.action_items, "owner")

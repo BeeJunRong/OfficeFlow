@@ -222,6 +222,144 @@ paths:
         '200':
           description: 服务正常
 
+  # ---------- 认证（登录/注册/登出） ----------
+
+  /api/auth/register:
+    post:
+      summary: 注册新用户
+      description: 用户名 2-32 字符、密码 ≥6 位；口令 PBKDF2 散列存储。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthRequest'
+      responses:
+        '200':
+          description: 注册成功
+        '400':
+          description: 用户名/密码校验失败
+        '409':
+          description: 用户名已被注册
+
+  /api/auth/login:
+    post:
+      summary: 登录
+      description: 校验口令后签发 7 天有效的 Bearer 令牌。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthRequest'
+      responses:
+        '200':
+          description: 登录成功，返回 token
+        '401':
+          description: 用户名或密码错误
+
+  /api/auth/logout:
+    post:
+      summary: 登出（吊销令牌）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '200':
+          description: 登出成功
+
+  # ---------- 对话管理（登录后，按用户隔离） ----------
+
+  /api/conversations:
+    get:
+      summary: 当前用户的对话列表
+      description: 最近更新在前，不含轮次正文。
+      parameters:
+        - in: header
+          name: Authorization
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 对话列表
+    post:
+      summary: 新建对话
+      parameters:
+        - in: header
+          name: Authorization
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConversationCreateRequest'
+      responses:
+        '200':
+          description: 新建成功
+
+  /api/conversations/{conv_id}:
+    get:
+      summary: 取单个对话（含完整轮次）
+      parameters:
+        - name: conv_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - in: header
+          name: Authorization
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 对话详情
+        '404':
+          description: 对话不存在
+    put:
+      summary: 更新对话标题和/或轮次
+      parameters:
+        - name: conv_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - in: header
+          name: Authorization
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConversationUpdateRequest'
+      responses:
+        '200':
+          description: 更新成功
+    delete:
+      summary: 删除对话
+      parameters:
+        - name: conv_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - in: header
+          name: Authorization
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 删除成功
+
 components:
   schemas:
     GenerateRequest:
@@ -242,26 +380,96 @@ components:
 
     GenerateResponse:
       type: object
+      description: 多产物契约：structured_result 为会议纪要专用（向后兼容），
+        其余 Skill 各用专有字段；derived_tasks 承载"可继续派生"的建议（理解 C）。
       properties:
         session_id:
           type: string
         task_type:
           type: string
-        result:
+        routed_by:
+          type: string
+          description: explicit / keyword / llm / fallback_rule / react
+        needs_clarification:
+          type: boolean
+          description: 路由置信度不足时为 True，前端应提示用户选择任务类型
+        message:
+          type: string
+        structured_result:
           $ref: '#/components/schemas/MeetingMinutes'
+        email_draft:
+          $ref: '#/components/schemas/EmailDraft'
+        weekly_report:
+          $ref: '#/components/schemas/WeeklyReport'
+        web_summary:
+          $ref: '#/components/schemas/WebSummary'
+        derived_tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/DerivedTask'
+          description: 基于本次产物可继续生成的任务；需用户点击才执行
+        derived_from:
+          type: string
+          description: 派生来源会话 id（空=本轮为原始输入）
+        markdown:
+          type: string
         tool_logs:
           type: array
           items:
             $ref: '#/components/schemas/ToolLog'
+        error_message:
+          type: string
+        reasoning_trace:
+          type: array
+          items:
+            type: object
+          description: ReAct 每轮决策追溯（step/thought/action/action_input/observation/status）
+        react_iteration:
+          type: integer
+          description: ReAct 循环迭代轮数（0=未走 ReAct）
+        outputs:
+          type: array
+          items:
+            type: object
+          description: 多步产物列表（多步规划时每个子任务的 markdown + 结构化结果）
 
     MeetingMinutes:
       type: object
+      description: 会议纪要结构化输出（标准六段式模板）
       properties:
         date:
           type: string
           example: "2026-10-09"
+        location:
+          type: string
+        host:
+          type: string
+        attendees:
+          type: array
+          items:
+            type: string
+        observers:
+          type: array
+          items:
+            type: string
+        absentees:
+          type: array
+          items:
+            type: string
+        recorder:
+          type: string
+        reviewer:
+          type: string
         topic:
           type: string
+        agenda:
+          type: array
+          items:
+            type: string
+        discussion:
+          type: array
+          items:
+            type: string
         decisions:
           type: array
           items:
@@ -270,21 +478,49 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ActionItem'
+        risks:
+          type: array
+          items:
+            type: string
+        next_meeting:
+          type: object
+          properties:
+            time:
+              type: string
+            location:
+              type: string
+            agenda:
+              type: string
+        attachments:
+          type: array
+          items:
+            type: string
 
     ActionItem:
       type: object
+      description: 单条待办事项（六段式扩展字段）
       properties:
         task:
           type: string
         owner:
           type: string
           example: "张三"
+        co_owner:
+          type: string
+          description: 协办
         deadline:
           type: string
           example: "2026-10-12"
+        deliverable:
+          type: string
+          description: 输出物
         evidence:
           type: string
           description: 原文证据片段
+        evidence_line:
+          type: integer
+          nullable: true
+          description: 证据片段在原始输入中的行号（1-based）
 
     ToolLog:
       type: object
@@ -496,53 +732,155 @@ components:
 
     WebSummary:
       type: object
+      description: 网页整理结构化输出（FR-04；单页读取，不批量爬取、不登录）
       properties:
-        url:
-          type: string
         title:
           type: string
-        key_points:
+          description: 网页标题
+        url:
+          type: string
+          description: 来源 URL
+        points:
           type: array
           items:
             type: string
           description: 3-6 条摘自原文段落的要点
+        word_count:
+          type: integer
+          description: 正文约字数
+
+    WeeklyReportItem:
+      type: object
+      description: 周报条目（保留 owner/deadline/evidence 便于零编造核对）
+      properties:
+        content:
+          type: string
+        owner:
+          type: string
+        deadline:
+          type: string
+        evidence:
+          type: string
+          description: 原文证据片段
+        evidence_line:
+          type: integer
+          nullable: true
+          description: 证据片段在原始输入中的行号（1-based）
 
     WeeklyReport:
       type: object
+      description: 周报结构化输出（由会议纪要派生：决定→进展，待办→下周计划）
       properties:
         period:
           type: string
+          description: 报告周期
+        topic:
+          type: string
+          description: 来源会议主题
         progress:
           type: array
           items:
-            type: string
-        plans:
+            $ref: '#/components/schemas/WeeklyReportItem'
+          description: 本周进展（来自关键决定）
+        next_plan:
           type: array
           items:
-            type: string
+            $ref: '#/components/schemas/WeeklyReportItem'
+          description: 下周计划（来自待办事项）
         risks:
           type: array
           items:
             type: string
+          description: 风险与待确认项
+        source_date:
+          type: string
+          description: 来源会议日期（溯源用）
 
     EmailDraft:
       type: object
+      description: 邮件草稿（发件人本人 + 协议 + 收件人列表）
       properties:
         sender:
           type: string
+          description: 发件人（本人）；缺失显示待确认
+        protocol:
+          type: string
+          enum: [draft_only, mailto, smtp]
+          default: draft_only
+          description: 发送协议，默认 draft_only（不发送）
         subject:
           type: string
+        greeting:
+          type: string
+          description: 称呼语（可按收件人替换）
         recipients:
           type: array
           items:
             $ref: '#/components/schemas/EmailRecipient'
+        shared_body:
+          type: string
+          description: 公共正文（可编辑，作为各封邮件的基础）
+        source_topic:
+          type: string
+          description: 来源会议主题（溯源用）
+        source_date:
+          type: string
+          description: 来源会议日期（溯源用）
 
     DerivedTask:
       type: object
+      description: 可派生的下游任务（由当前产物推导，需用户点击才执行）
       properties:
         task_type:
           type: string
         label:
           type: string
+          description: 按钮文案
         reason:
           type: string
+          description: 为何可派生（含人数/条目数等依据）
+
+    AuthRequest:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
+        password:
+          type: string
+          minLength: 1
+          maxLength: 128
+
+    LogoutRequest:
+      type: object
+      required:
+        - token
+      properties:
+        token:
+          type: string
+
+    ConversationCreateRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 64
+          default: 新对话
+
+    ConversationUpdateRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 64
+          nullable: true
+        turns:
+          type: array
+          nullable: true
+          items:
+            type: object
+          description: 前端每次生成后整存整取的轮次 JSON 序列

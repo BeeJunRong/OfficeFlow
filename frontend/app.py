@@ -107,12 +107,15 @@ def _wkey(base: str) -> str:
 
 # ---- 后端调用 ----
 
-def _generate(text: str, task_type: str | None) -> dict:
+def _generate(text: str, task_type: str | None, history: list[dict] | None = None) -> dict:
     """调用 /api/generate；后端不可用时构造等价的错误响应（内容保留）。"""
     try:
+        payload: dict = {"input_text": text, "task_type": task_type}
+        if history:
+            payload["history"] = history
         response = httpx.post(
             f"{BACKEND}/api/generate",
-            json={"input_text": text, "task_type": task_type},
+            json=payload,
             timeout=120,
         )
         response.raise_for_status()
@@ -156,9 +159,47 @@ def _export(
     return False, resp.get("error_message", "导出失败，可重试")
 
 
+def _build_history() -> list[dict]:
+    """从 ss.turns 构建历史对话上下文，供 ReAct 多轮感知。"""
+    history: list[dict] = []
+    for turn in ss.turns:
+        resp = turn.get("response", {})
+        history.append({
+            "role": "user",
+            "content": turn.get("user", ""),
+            "task_type": "",
+            "has_result": False,
+        })
+        has_result = bool(
+            resp.get("structured_result")
+            or resp.get("weekly_report")
+            or resp.get("email_draft")
+            or resp.get("web_summary")
+            or resp.get("markdown")
+        )
+        # 助手回复摘要：取最终答案或 markdown 前 200 字
+        content = ""
+        trace = resp.get("reasoning_trace", [])
+        if trace:
+            # 取最后一步的 thought 作为助手回复摘要
+            content = trace[-1].get("thought", "")
+        if not content:
+            content = (resp.get("markdown") or "")[:200]
+        history.append({
+            "role": "assistant",
+            "content": content,
+            "task_type": resp.get("task_type", ""),
+            "has_result": has_result,
+            # 后端据此从 SQLite 恢复上一轮结构化产物（"接着做周报/邮件"依赖）
+            "session_id": resp.get("session_id", ""),
+        })
+    return history
+
+
 def _submit(text: str) -> None:
     """提交一轮：用户消息 → 后端生成 → 追加到对话流。"""
-    response = _generate(text, ss.locked_task_type)
+    history = _build_history()
+    response = _generate(text, ss.locked_task_type, history=history)
     ss.turns.append(
         {
             "user": text,
@@ -455,6 +496,45 @@ def _render_tool_log(log: dict, delay: float | None = None) -> None:
             st.caption(detail)
 
 
+def _render_reasoning_trace(trace: list[dict], iteration: int) -> None:
+    """渲染 ReAct 决策追溯——豆包式自然语言叙述流。
+
+    不再用 ✅/❌ 卡片 + Step N · Thought/Action/Observation 折叠区，
+    而是用自然语言逐步叙述推理过程，类似豆包/DeepSeek 平台的"思考中"展示。
+    """
+    with st.status("思考中…", state="complete", expanded=True) as status:
+        for step in trace:
+            thought = step.get("thought", "")
+            action = step.get("action", "")
+            observation = step.get("observation", "")
+            status_flag = step.get("status", "")
+
+            # Thought：自然语言叙述（豆包式的"我先读取…""现在开始…"）
+            if thought:
+                st.markdown(thought)
+
+            # Action + Observation：工具调用的自然语言描述
+            if action and status_flag == "success":
+                label = TOOL_LABELS.get(action, f"调用工具 {action}")
+                # 用简洁的一行描述工具调用，不展示原始 JSON
+                st.markdown(f"*{label}*")
+                if observation:
+                    # observation 通常是"抽取成功（引擎=rule）..."之类的摘要
+                    # 只取第一句，避免过长
+                    first_sentence = observation.split("。")[0] + "。" if "。" in observation else observation
+                    st.caption(first_sentence)
+
+            # 最终答案
+            if status_flag == "final":
+                if thought:
+                    # thought 已上面显示，这里加完成标记
+                    pass
+            elif status_flag == "failed":
+                st.markdown(f"❌ {observation}")
+
+        status.update(label=f"已完成（{iteration} 步）", state="complete")
+
+
 def _render_turn(idx: int) -> None:
     """渲染一轮对话：用户消息 + 助手的工具步骤与可编辑结果。"""
     turn = ss.turns[idx]
@@ -469,12 +549,17 @@ def _render_turn(idx: int) -> None:
                 f"任务类型：**{resp['task_type']}** · 路由方式：{resp['routed_by']}"
             )
 
-        # 工具调用过程：首轮逐步呈现，之后直接静态展示
-        logs = resp.get("tool_logs", [])
-        if logs:
-            st.markdown("**Agent 执行过程**")
-            for log in logs:
-                _render_tool_log(log, delay=0.45 if not turn["animated"] else None)
+        # ReAct 通道（自动识别）：豆包式自然语言推理过程
+        reasoning_trace = resp.get("reasoning_trace", [])
+        if reasoning_trace:
+            _render_reasoning_trace(reasoning_trace, resp.get("react_iteration", 0))
+        else:
+            # Skill 通道（显式点击）：简洁的工具日志卡片
+            logs = resp.get("tool_logs", [])
+            if logs:
+                st.markdown("**Agent 执行过程**")
+                for log in logs:
+                    _render_tool_log(log, delay=0.45 if not turn["animated"] else None)
         turn["animated"] = True
 
         if resp.get("needs_clarification"):
@@ -483,8 +568,50 @@ def _render_turn(idx: int) -> None:
         if resp.get("error_message"):
             st.error(resp["error_message"])
 
-        # 生成结果：按任务类型分派渲染
-        _render_result(idx, turn)
+        # 多步产物展示：ReAct 多步规划时 outputs 含多个子任务产物
+        outputs = resp.get("outputs", [])
+        if outputs and len(outputs) > 1:
+            # 多步规划：按顺序展示每个子任务产物（可编辑 + 可导出）
+            for i, output in enumerate(outputs):
+                task_type = output.get("task_type", "")
+                task_label = {t: l for l, t in TASKS}.get(task_type, task_type)
+                st.markdown(f"### 产物 {i+1}：{task_label}")
+                md = output.get("markdown", "")
+
+                # 邮件草稿：用专用编辑器（含邮箱输入 + 发送按钮）
+                if task_type == "email_draft" and output.get("email_draft"):
+                    email_resp = {
+                        "session_id": resp.get("session_id", ""),
+                        "email_draft": output["email_draft"],
+                    }
+                    _render_email_draft(f"{idx}_o{i}", turn, email_resp)
+                else:
+                    # 会议纪要/周报/网页：可编辑 text_area + 导出
+                    edit_key = f"edit_{idx}_output_{i}"
+                    edited = st.text_area(
+                        f"产物 {i+1}",
+                        value=turn.get(f"edited_output_{i}", md),
+                        height=280,
+                        label_visibility="collapsed",
+                        key=edit_key,
+                    )
+                    turn[f"edited_output_{i}"] = edited
+                    export_key = f"export_{idx}_output_{i}"
+                    if st.button(f"导出 {task_label}", key=export_key, type="primary"):
+                        result = _export(resp.get("session_id", ""), edited, task_type)
+                        turn[f"export_result_output_{i}"] = result
+                        st.rerun()
+                    prev = turn.get(f"export_result_output_{i}")
+                    if prev is not None:
+                        ok, info = prev
+                        if ok:
+                            st.success(f"导出成功：{info}")
+                        else:
+                            st.error(f"{info}，内容已保留")
+                st.divider()
+        else:
+            # 单产物或 Skill 通道：按原有逻辑渲染
+            _render_result(idx, turn)
 
 
 # ---- 结果渲染（按任务类型分派） ----
@@ -555,7 +682,14 @@ def _render_weekly(idx: int, turn: dict, response: dict) -> None:
         st.markdown("**本周进展**")
         if report["progress"]:
             for p in report["progress"]:
-                st.markdown(f"- {p['content']}")
+                line = p.get("evidence_line")
+                evidence = p.get("evidence") or ""
+                suffix = (
+                    f"（原文第{line}行" + (f"：{evidence}" if evidence else "") + "）"
+                    if line
+                    else ""
+                )
+                st.markdown(f"- {p['content']}{suffix}")
         else:
             st.markdown("- 待确认")
         st.markdown("**下周计划**")
@@ -566,7 +700,11 @@ def _render_weekly(idx: int, turn: dict, response: dict) -> None:
                         "事项": n["content"],
                         "负责人": n["owner"],
                         "计划完成": n["deadline"],
-                        "原文依据": n["evidence"],
+                        "原文依据": (
+                            f"第{n['evidence_line']}行：{n.get('evidence') or ''}"
+                            if n.get("evidence_line")
+                            else n["evidence"]
+                        ),
                     }
                     for n in report["next_plan"]
                 ],
@@ -706,44 +844,62 @@ def _render_email_draft(idx: int, turn: dict, response: dict) -> None:
 
     # ---- 收件人（人数来自会议纪要分析） ----
     st.markdown(f"**收件人：共从会议纪要中分析出 {len(recipients)} 位**")
+    values_out: list[dict] = []
     if not recipients:
         st.warning(
-            "未能从会议纪要中分析出负责人，无法生成收件人。"
-            "请在纪要中补充负责人后重新派生。",
+            "未能自动分析出收件人（纪要中可能没有明确负责人）。"
+            "可手动填写一位收件人，或补充纪要负责人后重新派生。",
             icon="⚠️",
         )
-        return
-
-    st.caption("姓名来自会议纪要；**邮箱需你手动填写**（系统不会推测或拼接邮箱地址）。")
-
-    values_out: list[dict] = []
-    for i, r in enumerate(recipients):
-        with st.container(border=True):
-            head, send_col = st.columns([3, 1])
-            head.markdown(f"**{i + 1}. {r['name']}**")
-            send = send_col.checkbox(
-                "发送这封",
-                value=bool(r.get("send", False)),
-                key=f"send_{idx}_{i}",
-                help="默认不勾选。只有勾选的收件人才会在你点击下方按钮时被处理。",
-            )
-            email = st.text_input(
-                "邮箱",
-                value=r.get("email", ""),
-                key=f"mail_{idx}_{i}",
-                placeholder="you@example.com（需手动填写）",
-            )
-            content = st.text_area(
-                "内容（可编辑）",
-                value=r.get("content", ""),
-                key=f"body_{idx}_{i}",
-                height=150,
-            )
-            if email and "@" not in email:
-                st.caption("⚠️ 邮箱格式看起来不正确")
+        st.caption("系统不会推测或拼接邮箱地址；邮箱一律由你手动填写。")
+        manual_name = st.text_input("收件人姓名", key=f"manual_name_{idx}")
+        manual_email = st.text_input(
+            "收件人邮箱", key=f"manual_email_{idx}", placeholder="you@example.com"
+        )
+        manual_content = st.text_area(
+            "邮件内容（可编辑）",
+            value=f"您好！\n\n{draft.get('subject', '')}",
+            key=f"manual_body_{idx}",
+            height=150,
+        )
+        if manual_name.strip() or manual_email.strip():
             values_out.append(
-                {"name": r["name"], "email": email, "content": content, "send": send}
+                {
+                    "name": manual_name.strip() or "（手动收件人）",
+                    "email": manual_email.strip(),
+                    "content": manual_content,
+                    "send": False,
+                }
             )
+    else:
+        st.caption("姓名来自会议纪要；**邮箱需你手动填写**（系统不会推测或拼接邮箱地址）。")
+        for i, r in enumerate(recipients):
+            with st.container(border=True):
+                head, send_col = st.columns([3, 1])
+                head.markdown(f"**{i + 1}. {r['name']}**")
+                send = send_col.checkbox(
+                    "发送这封",
+                    value=bool(r.get("send", False)),
+                    key=f"send_{idx}_{i}",
+                    help="默认不勾选。只有勾选的收件人才会在你点击下方按钮时被处理。",
+                )
+                email = st.text_input(
+                    "邮箱",
+                    value=r.get("email", ""),
+                    key=f"mail_{idx}_{i}",
+                    placeholder="you@example.com（需手动填写）",
+                )
+                content = st.text_area(
+                    "内容（可编辑）",
+                    value=r.get("content", ""),
+                    key=f"body_{idx}_{i}",
+                    height=150,
+                )
+                if email and "@" not in email:
+                    st.caption("⚠️ 邮箱格式看起来不正确")
+                values_out.append(
+                    {"name": r["name"], "email": email, "content": content, "send": send}
+                )
 
     selected = sum(1 for v in values_out if v["send"])
     st.caption(f"已勾选 {selected} / {len(values_out)} 位。未勾选的不会被处理。")

@@ -20,6 +20,14 @@ from app.schemas import (
 EXPORT_DIR = Path(os.getenv("OFFICEFLOW_EXPORT_DIR", "exports"))
 
 
+def _evidence_cell(evidence: str, line: int | None) -> str:
+    """原文依据单元格：优先显示"第N行：原文片段"。"""
+    text = (evidence or "").replace("|", "\\|")
+    if line:
+        return f"第{line}行：{text}" if text else f"第{line}行"
+    return text
+
+
 def render_markdown(minutes: MeetingMinutes) -> str:
     """结构化结果 → 标准会议纪要模板（用户指定结构）。
 
@@ -70,7 +78,7 @@ def render_markdown(minutes: MeetingMinutes) -> str:
     ]
     if minutes.action_items:
         for i, item in enumerate(minutes.action_items, start=1):
-            evidence = item.evidence.replace("|", "\\|") if item.evidence else ""
+            evidence = _evidence_cell(item.evidence, item.evidence_line)
             lines.append(
                 f"| {i} | {item.task} | {item.owner} | {item.co_owner} "
                 f"| {item.deadline} | {item.deliverable} | {evidence} |"
@@ -154,7 +162,12 @@ def render_weekly_markdown(report: WeeklyReport) -> str:
         "## 本周进展",
     ]
     if report.progress:
-        lines.extend(f"- {p.content}" for p in report.progress)
+        for p in report.progress:
+            if p.evidence_line:
+                detail = f"第{p.evidence_line}行" + (f"：{p.evidence}" if p.evidence else "")
+                lines.append(f"- {p.content}（原文{detail}）")
+            else:
+                lines.append(f"- {p.content}")
     else:
         lines.append(f"- {PENDING}")
     lines.append("")
@@ -165,7 +178,7 @@ def render_weekly_markdown(report: WeeklyReport) -> str:
         lines.append("| 事项 | 负责人 | 计划完成 | 原文依据 |")
         lines.append("|------|--------|----------|----------|")
         for it in report.next_plan:
-            evidence = it.evidence.replace("|", "\\|") if it.evidence else ""
+            evidence = _evidence_cell(it.evidence, it.evidence_line)
             lines.append(
                 f"| {it.content} | {it.owner} | {it.deadline} | {evidence} |"
             )

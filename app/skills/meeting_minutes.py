@@ -82,8 +82,10 @@ class MeetingMinutesSkill(Skill):
                 "error_message": f"抽取工具失败：{exc}，内容已保留，可重试",
             }
 
-        # 校验节点：零编造检查
-        minutes, corrections = validate_minutes(minutes, text)
+        # 校验节点：零编造检查（行号以原始输入为准）
+        minutes, corrections = validate_minutes(
+            minutes, text, line_source_text=state.get("raw_input_text")
+        )
         log(
             "validate",
             "success",

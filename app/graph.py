@@ -1,9 +1,18 @@
-"""LangGraph 工作流（architecture.md §5，ReAct 架构）。
+"""LangGraph 工作流（architecture.md §5，双通道架构）。
 
-状态图：react → (fallback?) → END
-- ReAct 节点：LLM 通过 function calling 自主选择工具与顺序（Thought-Action-Observation 循环）。
-- 降级路径：LLM 不可用时走 route → Skill 流水线（保留零编造与离线可用性）。
-- 导出/重试不走图，由 API 层显式触发（Q-02：导出必须用户点击）。
+双通道：
+- 通道 1（显式点击 → Skill 硬编码流水线）：task_type 非空时直接走 Skill，
+  确定性、零编造、可验收。不经过 ReAct、不经过路由（task_type 已知）。
+- 通道 2（"自动识别" → ReAct）：task_type 为空时走 ReAct 循环，
+  LLM 通过 function calling 自主选择工具。
+  LLM 不可用时降级到 route → Skill（保留离线可用性）。
+
+状态图：
+  START → dispatch → (skill_execute | react)
+    skill_execute → END
+    react → (fallback_route?) → (fallback_execute?) → END
+
+导出/重试不走图，由 API 层显式触发（Q-02：导出必须用户点击）。
 """
 
 from datetime import datetime, timezone
@@ -27,16 +36,46 @@ def _log(tool_name: str, status: str, error_message: str = "") -> dict[str, Any]
     }
 
 
-def react_entry_node(state: AgentState) -> AgentState:
-    """ReAct 入口：清理输入后进入 ReAct 循环。"""
-    body = strip_template_prefix(state.get("input_text", ""))
+def dispatch_node(state: AgentState) -> AgentState:
+    """分发节点：清理输入，记录通道选择。
+
+    本节点不做执行，只做输入清理与通道标记，由条件边决定走哪条通道。
+    保留原始输入（raw_input_text）供降级路由使用——strip_template_prefix
+    会剥掉"请帮我整理会议纪要："前缀，但降级路由需要该前缀做关键词识别。
+    """
+    raw = state.get("input_text", "")
+    body = strip_template_prefix(raw)
     cleaned = clean_input_text(body)
-    return react_node({**state, "input_text": cleaned})
+    return {**state, "input_text": cleaned, "raw_input_text": raw}
+
+
+def skill_execute_node(state: AgentState) -> AgentState:
+    """通道 1：显式点击 → Skill 硬编码流水线。
+
+    task_type 已由前端确定，直接分发到对应 Skill，不经过 ReAct、不经过路由。
+    保留原有零编造、可验收、离线可用特性。
+    """
+    task_type = state.get("task_type", "")
+    logs: list[dict[str, Any]] = list(state.get("tool_logs", []))
+    logs.append(_log("route", "success", f"显式选择 task_type={task_type}（explicit）"))
+    skill = get_skill(task_type)
+    result = skill.run({**state, "routed_by": "explicit", "tool_logs": logs})
+    return result
+
+
+def react_entry_node(state: AgentState) -> AgentState:
+    """通道 2 入口：自动识别 → ReAct 循环。"""
+    return react_node(state)
 
 
 def fallback_route_node(state: AgentState) -> AgentState:
-    """降级路由：LLM 不可用时用分层路由（显式→关键词）确定 task_type。"""
-    result = route_task(state.get("input_text", ""), state.get("task_type"))
+    """降级路由：LLM 不可用时用分层路由（关键词→LLM 兜底）确定 task_type。
+
+    用原始输入（raw_input_text）做路由，因为 strip_template_prefix 会剥掉
+    "请帮我整理会议纪要："前缀，而降级路由需要该前缀做关键词识别。
+    """
+    route_text = state.get("raw_input_text") or state.get("input_text", "")
+    result = route_task(route_text, state.get("task_type"))
     if result.needs_clarification or not result.task_type:
         return {
             **state,
@@ -69,6 +108,13 @@ def fallback_execute_node(state: AgentState) -> AgentState:
     return skill.run(state)
 
 
+def should_dispatch(state: AgentState) -> str:
+    """条件边：task_type 非空走 Skill 通道，否则走 ReAct 通道。"""
+    if state.get("task_type"):
+        return "skill_execute"
+    return "react"
+
+
 def should_fallback(state: AgentState) -> str:
     """条件边：ReAct 标记降级时走 fallback 路径。"""
     if state.get("_react_fallback"):
@@ -83,10 +129,16 @@ def should_execute(state: AgentState) -> str:
 
 def build_graph() -> Any:
     graph = StateGraph(AgentState)
+    graph.add_node("dispatch", dispatch_node)
+    graph.add_node("skill_execute", skill_execute_node)
     graph.add_node("react", react_entry_node)
     graph.add_node("fallback_route", fallback_route_node)
     graph.add_node("fallback_execute", fallback_execute_node)
-    graph.add_edge(START, "react")
+    graph.add_edge(START, "dispatch")
+    graph.add_conditional_edges(
+        "dispatch", should_dispatch, {"skill_execute": "skill_execute", "react": "react"}
+    )
+    graph.add_edge("skill_execute", END)
     graph.add_conditional_edges(
         "react", should_fallback, {"fallback_route": "fallback_route", "end": END}
     )

@@ -267,16 +267,198 @@ TOOL_SPECS: list[dict[str, Any]] = [
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
 
+# LLM 在工具参数里可能使用的键名别名（中英文、ActionItem/WeeklyReportItem 混淆）
+_TASK_ALIASES = ("task", "content", "item", "action", "description", "事项", "待办", "title")
+_OWNER_ALIASES = ("owner", "负责人", "assignee", "responsible", "person")
+_DEADLINE_ALIASES = ("deadline", "截止日期", "截止时间", "due", "due_date", "date")
+_CO_OWNER_ALIASES = ("co_owner", "协办", "协助", "supporter")
+_DELIVERABLE_ALIASES = ("deliverable", "输出物", "deliverables", "output")
+_EVIDENCE_ALIASES = ("evidence", "原文依据", "quote", "source")
+
+
+def _pick_str(data: dict[str, Any], aliases: tuple[str, ...]) -> str | None:
+    """按别名取第一个非空字符串值。"""
+    for key in aliases:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _coerce_action_items(raw: Any) -> list[dict[str, Any]]:
+    """把 LLM 可能返回的各种形状容错归一化为 ActionItem dict 列表。
+
+    覆盖的真实故障：LLM 用 `{"content": ..., "deadline": ...}`（缺 task）、
+    `{"task": null, "content": ...}`、中文键名、字符串条目等。
+    归一化后每个条目都保证有非空 task，避免 Pydantic 校验失败。
+    """
+    if not isinstance(raw, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            task = _pick_str(item, _TASK_ALIASES)
+            if not task:
+                # 最后兜底：取第一个非空字符串值，宁愿冗余也不丢信息
+                task = next(
+                    (v.strip() for v in item.values() if isinstance(v, str) and v.strip()),
+                    PENDING,
+                )
+            result.append(
+                {
+                    "task": task,
+                    "owner": _pick_str(item, _OWNER_ALIASES) or PENDING,
+                    "co_owner": _pick_str(item, _CO_OWNER_ALIASES) or PENDING,
+                    "deadline": _pick_str(item, _DEADLINE_ALIASES) or PENDING,
+                    "deliverable": _pick_str(item, _DELIVERABLE_ALIASES) or PENDING,
+                    "evidence": _pick_str(item, _EVIDENCE_ALIASES) or "",
+                    "evidence_line": item.get("evidence_line")
+                    if isinstance(item.get("evidence_line"), int)
+                    else None,
+                }
+            )
+        elif isinstance(item, str):
+            # 尝试拆分"负责人：任务"格式
+            for sep in ("：", ":", " "):
+                if sep in item:
+                    owner, _, task = item.partition(sep)
+                    result.append(
+                        {
+                            "task": task.strip() or item,
+                            "owner": owner.strip() or PENDING,
+                            "co_owner": PENDING,
+                            "deadline": PENDING,
+                            "deliverable": PENDING,
+                            "evidence": item,
+                        }
+                    )
+                    break
+            else:
+                result.append(
+                    {
+                        "task": item,
+                        "owner": PENDING,
+                        "co_owner": PENDING,
+                        "deadline": PENDING,
+                        "deliverable": PENDING,
+                        "evidence": item,
+                    }
+                )
+    return result
+
+
+def _coerce_weekly_items(raw: Any) -> list[dict[str, Any]]:
+    """把 LLM 可能返回的各种形状容错归一化为 WeeklyReportItem dict 列表。"""
+    if not isinstance(raw, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            content = _pick_str(item, _TASK_ALIASES)
+            if not content:
+                content = next(
+                    (v.strip() for v in item.values() if isinstance(v, str) and v.strip()),
+                    PENDING,
+                )
+            result.append(
+                {
+                    "content": content,
+                    "owner": _pick_str(item, _OWNER_ALIASES) or PENDING,
+                    "deadline": _pick_str(item, _DEADLINE_ALIASES) or PENDING,
+                    "evidence": _pick_str(item, _EVIDENCE_ALIASES) or "",
+                    "evidence_line": item.get("evidence_line")
+                    if isinstance(item.get("evidence_line"), int)
+                    else None,
+                }
+            )
+        elif isinstance(item, str):
+            result.append(
+                {
+                    "content": item,
+                    "owner": PENDING,
+                    "deadline": PENDING,
+                    "evidence": item,
+                }
+            )
+    return result
+
+
+def _coerce_str_list(raw: Any) -> list[str]:
+    """把 LLM 可能返回的 dict 列表或混合列表容错转为字符串列表。
+
+    decisions/attendees/risks 等字段是 list[str]，但 LLM 可能返回
+    [{"content": "..."}] 或 [{"item": "..."}] 而非 ["..."]。
+    """
+    if not isinstance(raw, list):
+        return []
+    result: list[str] = []
+    for item in raw:
+        if isinstance(item, str):
+            result.append(item)
+        elif isinstance(item, dict):
+            # 从 dict 中提取字符串值
+            for key in ("content", "item", "text", "value", "decision", "risk", "name", "person"):
+                if key in item and isinstance(item[key], str):
+                    result.append(item[key])
+                    break
+            else:
+                # 取第一个字符串值
+                for v in item.values():
+                    if isinstance(v, str) and v.strip():
+                        result.append(v)
+                        break
+    return result
+
+
+def _safe_parse_minutes(raw: dict[str, Any]) -> MeetingMinutes | None:
+    """容错反序列化 MeetingMinutes：自动修复 action_items 字符串列表等问题。"""
+    fixed = dict(raw)
+    # 修复 action_items：字符串/键名错误 → ActionItem dict
+    if "action_items" in fixed:
+        fixed["action_items"] = _coerce_action_items(fixed["action_items"])
+    # 修复 decisions/attendees 等：确保是字符串列表（LLM 可能返回 dict 列表）
+    for key in ("decisions", "attendees", "observers", "absentees", "risks"):
+        if key in fixed:
+            fixed[key] = _coerce_str_list(fixed[key])
+    try:
+        return MeetingMinutes(**fixed)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("MeetingMinutes 反序列化仍失败：%s", exc)
+        return None
+
+
+def _safe_parse_weekly_report(raw: dict[str, Any]) -> WeeklyReport | None:
+    """容错反序列化 WeeklyReport：自动修复 progress/next_plan 字符串列表等问题。"""
+    fixed = dict(raw)
+    for key in ("progress", "next_plan"):
+        if key in fixed:
+            fixed[key] = _coerce_weekly_items(fixed[key])
+    if "risks" in fixed and not isinstance(fixed["risks"], list):
+        fixed["risks"] = [fixed["risks"]] if fixed["risks"] else []
+    try:
+        return WeeklyReport(**fixed)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("WeeklyReport 反序列化仍失败：%s", exc)
+        return None
+
+
 def _handle_extract_fields(args: dict[str, Any]) -> dict[str, Any]:
     text = (args.get("text") or "").strip()
     if not text:
         return {"summary": "错误：text 为空", "state_updates": {}}
     minutes, engine = extract_meeting_minutes(text)
+    # 摘要里带上待办要素，便于 LLM 规划"是否派生周报/邮件"；
+    # 完整数据通过 state 注入下一工具，不要求 LLM 转述。
+    item_brief = "；".join(
+        f"{i.task}({i.owner}/{i.deadline})" for i in minutes.action_items[:8]
+    )
     return {
         "summary": (
             f"抽取成功（引擎={engine}）。字段：topic={minutes.topic!r}, "
             f"date={minutes.date!r}, decisions={len(minutes.decisions)} 条, "
-            f"action_items={len(minutes.action_items)} 条。"
+            f"action_items={len(minutes.action_items)} 条"
+            + (f"：[{item_brief}]" if item_brief else "。")
+            + "完整结构化结果已保存在系统状态中，调用 validate 时无需重复填写。"
             "请接着调用 validate 做零编造校验。"
         ),
         "state_updates": {
@@ -288,11 +470,14 @@ def _handle_extract_fields(args: dict[str, Any]) -> dict[str, Any]:
 def _handle_validate(args: dict[str, Any]) -> dict[str, Any]:
     minutes_raw = args.get("minutes") or {}
     source_text = args.get("source_text") or ""
-    try:
-        minutes = MeetingMinutes(**minutes_raw)
-    except Exception as exc:  # noqa: BLE001
-        return {"summary": f"错误：minutes 反序列化失败：{exc}", "state_updates": {}}
-    minutes, corrections = validate_minutes(minutes, source_text)
+    minutes = _safe_parse_minutes(minutes_raw)
+    if minutes is None:
+        return {"summary": "错误：minutes 反序列化失败，请重新调用 extract_fields", "state_updates": {}}
+    minutes, corrections = validate_minutes(
+        minutes,
+        source_text,
+        line_source_text=args.get("line_source_text") or source_text,
+    )
     # 缺失值兜底
     minutes = minutes.model_copy(
         update={"date": minutes.date or PENDING, "topic": minutes.topic or PENDING}
@@ -311,10 +496,9 @@ def _handle_validate(args: dict[str, Any]) -> dict[str, Any]:
 
 def _handle_render_markdown(args: dict[str, Any]) -> dict[str, Any]:
     minutes_raw = args.get("minutes") or {}
-    try:
-        minutes = MeetingMinutes(**minutes_raw)
-    except Exception as exc:  # noqa: BLE001
-        return {"summary": f"错误：minutes 反序列化失败：{exc}", "state_updates": {}}
+    minutes = _safe_parse_minutes(minutes_raw)
+    if minutes is None:
+        return {"summary": "错误：minutes 反序列化失败", "state_updates": {}}
     markdown = render_markdown(minutes)
     return {
         "summary": "会议纪要 Markdown 已生成，可输出给用户。",
@@ -328,11 +512,10 @@ def _handle_render_markdown(args: dict[str, Any]) -> dict[str, Any]:
 
 def _handle_build_weekly_report(args: dict[str, Any]) -> dict[str, Any]:
     minutes_raw = args.get("minutes") or {}
-    try:
-        minutes = MeetingMinutes(**minutes_raw)
-    except Exception as exc:  # noqa: BLE001
-        return {"summary": f"错误：minutes 反序列化失败：{exc}", "state_updates": {}}
-    report, notes = build_weekly_report(minutes)
+    minutes = _safe_parse_minutes(minutes_raw)
+    if minutes is None:
+        return {"summary": "错误：minutes 反序列化失败", "state_updates": {}}
+    report, notes = build_weekly_report(minutes, args.get("source_text") or "")
     return {
         "summary": (
             f"周报已派生：进展 {len(report.progress)} 项 / 计划 {len(report.next_plan)} 项 / "
@@ -346,10 +529,9 @@ def _handle_build_weekly_report(args: dict[str, Any]) -> dict[str, Any]:
 
 def _handle_render_weekly(args: dict[str, Any]) -> dict[str, Any]:
     report_raw = args.get("weekly_report") or {}
-    try:
-        report = WeeklyReport(**report_raw)
-    except Exception as exc:  # noqa: BLE001
-        return {"summary": f"错误：weekly_report 反序列化失败：{exc}", "state_updates": {}}
+    report = _safe_parse_weekly_report(report_raw)
+    if report is None:
+        return {"summary": "错误：weekly_report 反序列化失败", "state_updates": {}}
     markdown = render_weekly_markdown(report)
     return {
         "summary": "周报 Markdown 已生成，可输出给用户。",
@@ -365,17 +547,15 @@ def _handle_build_email_draft(args: dict[str, Any]) -> dict[str, Any]:
     minutes_raw = args.get("minutes")
     report_raw = args.get("weekly_report")
     if minutes_raw:
-        try:
-            minutes = MeetingMinutes(**minutes_raw)
-        except Exception as exc:  # noqa: BLE001
-            return {"summary": f"错误：minutes 反序列化失败：{exc}", "state_updates": {}}
+        minutes = _safe_parse_minutes(minutes_raw)
+        if minutes is None:
+            return {"summary": "错误：minutes 反序列化失败", "state_updates": {}}
         topic, date_str = minutes.topic, minutes.date
         recipients = recipients_from_minutes(minutes)
     elif report_raw:
-        try:
-            report = WeeklyReport(**report_raw)
-        except Exception as exc:  # noqa: BLE001
-            return {"summary": f"错误：weekly_report 反序列化失败：{exc}", "state_updates": {}}
+        report = _safe_parse_weekly_report(report_raw)
+        if report is None:
+            return {"summary": "错误：weekly_report 反序列化失败", "state_updates": {}}
         topic, date_str = report.topic, report.source_date
         recipients = recipients_from_report(report)
     else:

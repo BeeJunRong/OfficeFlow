@@ -18,7 +18,7 @@ from typing import Any
 from app.schemas import PENDING, AgentState, MeetingMinutes, WeeklyReport, WeeklyReportItem
 from app.skills.base import Skill
 from app.tools.extract_fields import extract_meeting_minutes
-from app.validate import validate_minutes
+from app.validate import locate_line, validate_minutes
 
 
 def _week_period(meeting_date: str) -> str:
@@ -43,16 +43,29 @@ def _minutes_from_state(state: AgentState, text: str) -> MeetingMinutes:
         except Exception:  # noqa: BLE001
             pass
     minutes, _engine = extract_meeting_minutes(text)
-    minutes, _corrections = validate_minutes(minutes, text)
+    minutes, _corrections = validate_minutes(
+        minutes, text, line_source_text=state.get("raw_input_text")
+    )
     return minutes
 
 
-def build_weekly_report(minutes: MeetingMinutes) -> tuple[WeeklyReport, list[str]]:
-    """会议纪要 → 周报。返回 (周报, 校验说明列表)。"""
+def build_weekly_report(
+    minutes: MeetingMinutes, source_text: str | None = None
+) -> tuple[WeeklyReport, list[str]]:
+    """会议纪要 → 周报。返回 (周报, 校验说明列表)。
+
+    source_text 提供原始输入时，为每条进展/计划补充"原文第 N 行"定位。
+    """
     notes: list[str] = []
 
     progress = [
-        WeeklyReportItem(content=d, owner=PENDING, deadline=PENDING, evidence=d)
+        WeeklyReportItem(
+            content=d,
+            owner=PENDING,
+            deadline=PENDING,
+            evidence=d,
+            evidence_line=locate_line(source_text or "", d),
+        )
         for d in minutes.decisions
         if d and d.strip()
     ]
@@ -65,6 +78,8 @@ def build_weekly_report(minutes: MeetingMinutes) -> tuple[WeeklyReport, list[str
             owner=item.owner,
             deadline=item.deadline,
             evidence=item.evidence,
+            evidence_line=item.evidence_line
+            or locate_line(source_text or "", item.evidence or item.task),
         )
         next_plan.append(entry)
         missing = []
@@ -154,7 +169,9 @@ class WeeklyReportSkill(Skill):
             "复用会议纪要结构化结果（派生）" if derived else "从原文抽取",
         )
 
-        report, notes = build_weekly_report(minutes)
+        report, notes = build_weekly_report(
+            minutes, state.get("raw_input_text") or text
+        )
         log(
             "validate",
             "success",

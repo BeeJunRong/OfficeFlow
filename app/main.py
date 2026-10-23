@@ -170,6 +170,9 @@ def _to_response(
         markdown=state.get("markdown", ""),
         tool_logs=[ToolLog(**log) for log in state.get("tool_logs", [])],
         error_message=state.get("error_message", ""),
+        reasoning_trace=state.get("reasoning_trace", []),
+        react_iteration=state.get("react_iteration", 0),
+        outputs=state.get("outputs", []),
     )
 
 
@@ -268,9 +271,40 @@ def delete_conversation(conv_id: str, authorization: str = Header(default="")) -
     return {"ok": True}
 
 
+def _seed_from_history(history: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """从历史对话恢复上一轮结构化产物（跨轮"接着做"的关键）。
+
+    前端 history 中的 assistant 条目带 session_id；这里从 SQLite 取回该轮
+    主产物，按类型放回 AgentState。这样"接着整理成周报/发邮件"时，
+    Skill 与 ReAct 都能直接复用真实纪要，而不是让模型凭摘要重写。
+    """
+    store = get_store()
+    for turn in reversed(history or []):
+        if turn.get("role") != "assistant":
+            continue
+        session_id = turn.get("session_id") or ""
+        if not session_id:
+            continue
+        stored = store.get_structured_result(session_id)
+        if not stored:
+            continue
+        task_type = turn.get("task_type") or ""
+        if task_type == "weekly_report":
+            return {"weekly_report": stored, "seed_from": session_id}
+        if task_type == "email_draft":
+            return {"email_draft": stored, "seed_from": session_id}
+        # meeting_minutes / web_summary 的主产物都放在 structured_result
+        return {"structured_result": stored, "seed_from": session_id}
+    return {}
+
+
 @app.post("/api/generate", response_model=GenerateResponse)
 def generate(req: GenerateRequest) -> GenerateResponse:
-    """触发生成：空输入阻止；路由→抽取→校验→渲染。"""
+    """触发生成：空输入阻止；路由→抽取→校验→渲染。
+
+    自动识别模式下，历史对话中上一轮的结构化产物会先注入状态，
+    供"接着整理成周报/生成邮件"等跨轮指令复用（不重新抽取）。
+    """
     if not req.input_text or not req.input_text.strip():
         raise HTTPException(status_code=400, detail="请输入非空会议文字记录")
 
@@ -280,7 +314,9 @@ def generate(req: GenerateRequest) -> GenerateResponse:
             "session_id": session_id,
             "input_text": req.input_text,
             "task_type": req.task_type,
+            "history": req.history or [],
             "tool_logs": [],
+            **_seed_from_history(req.history),
         }
     )
     _persist(state, session_id, req.input_text)
