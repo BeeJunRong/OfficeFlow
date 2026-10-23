@@ -407,33 +407,42 @@ def test_preserve_entities():
 
 ## Task 3: 集成到工作流 `app/graph.py`
 
-**目标**：在 `graph.py:execute_node()` 中集成 `clean_input_text` 调用，使清理模块在模板前缀剥离之后、Skill 执行之前生效。
+**目标**：在 `graph.py` 中集成 `clean_input_text` 调用，使清理模块在模板前缀剥离之后、Skill 执行之前生效。
+
+> **更新说明（未发布版本）**：因工作流从单通道 `route → execute` 演进为双通道
+> `dispatch → (skill_execute | react)`，清理集成位置从原设计的 `execute_node`
+> 调整为 `dispatch_node`。功能效果与 CON-DC-05/CON-DC-06 约束一致，
+> 仅集成节点名称变化。
 
 **输入**：`app/cleaning.py` 模块（Task 1 产出）、`app/graph.py` 现有代码。
 
-**输出**：修改后的 `app/graph.py`，`execute_node` 中新增 import 和清理调用。
+**输出**：修改后的 `app/graph.py`，`dispatch_node` 中新增 import 和清理调用。
 
 **验收标准**：
-- `execute_node` 中 `strip_template_prefix` 之后调用 `clean_input_text`
-- 清理后文本传入 `skill.run()` 的 `state["input_text"]`
+- `dispatch_node` 中 `strip_template_prefix` 之后调用 `clean_input_text`
+- 清理后文本传入 `state["input_text"]`，原始输入保留在 `state["raw_input_text"]`
 - 落库仍存原始 `req.input_text`（`main.py` 不改动，天然满足）
 
 **覆盖需求**：CON-DC-05, CON-DC-06
 
 ---
 
-### 3.1 修改 `execute_node` 调用清理
+### 3.1 修改 `dispatch_node` 调用清理
 
-**描述**：在 `app/graph.py` 文件顶部新增 `from app.cleaning import clean_input_text` 导入语句。在 `execute_node` 函数中，`body = strip_template_prefix(...)` 之后新增 `cleaned = clean_input_text(body)`，并将 `skill.run({**state, "input_text": body})` 改为 `skill.run({**state, "input_text": cleaned})`。
+**描述**：在 `app/graph.py` 文件顶部新增 `from app.cleaning import clean_input_text` 导入语句。在 `dispatch_node` 函数中，`body = strip_template_prefix(...)` 之后新增 `cleaned = clean_input_text(body)`，并设置 `state["input_text"] = cleaned`、`state["raw_input_text"] = raw`（保留原始输入供降级路由与行号定位使用）。
 
-**输入**：`app/graph.py` 当前 `execute_node` 实现。
+> **集成位置变更说明**：原设计为在 `execute_node` 中集成，因双通道架构演进
+> （`execute_node` 拆分为 `dispatch_node` + `skill_execute_node` + `react_entry_node`），
+> 清理统一在 `dispatch_node` 执行，确保两条通道都能拿到清理后的输入。
 
-**输出**：修改后的 `execute_node`，包含清理调用。
+**输入**：`app/graph.py` 当前 `dispatch_node` 实现。
+
+**输出**：修改后的 `dispatch_node`，包含清理调用。
 
 **验收标准**：
 - import 语句位于文件顶部 import 区
-- `execute_node` 中清理在 `strip_template_prefix` 之后执行
-- 清理后文本传入 Skill
+- `dispatch_node` 中清理在 `strip_template_prefix` 之后执行
+- 清理后文本传入 `state["input_text"]`，原始输入保留在 `state["raw_input_text"]`
 - 不影响 `needs_clarification` 分支（该分支直接返回 state，不经过清理）
 
 **覆盖需求**：CON-DC-05, CON-DC-06

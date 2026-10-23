@@ -32,6 +32,9 @@ class ActionItem(BaseModel):
     deadline: str = Field(default=PENDING, description="截止时间")
     deliverable: str = Field(default=PENDING, description="输出物")
     evidence: str = Field(default="", description="原文证据片段")
+    evidence_line: Optional[int] = Field(
+        default=None, description="证据片段在原始输入中的行号（1-based）"
+    )
 
 
 class NextMeeting(BaseModel):
@@ -138,6 +141,9 @@ class WeeklyReportItem(BaseModel):
     owner: str = Field(default=PENDING, description="负责人")
     deadline: str = Field(default=PENDING, description="截止/计划时间")
     evidence: str = Field(default="", description="原文证据片段")
+    evidence_line: Optional[int] = Field(
+        default=None, description="证据片段在原始输入中的行号（1-based）"
+    )
 
 
 class WeeklyReport(BaseModel):
@@ -174,6 +180,12 @@ class GenerateRequest(BaseModel):
         default=None,
         description="显式任务类型（点击提示按钮时由前端传入）；"
         "传入后锁定，不再依据正文关键词路由",
+    )
+    history: Optional[list[dict[str, Any]]] = Field(
+        default=None,
+        description="历史对话上下文（自动识别模式下让 ReAct 感知之前生成了什么，"
+        "支持'继续生成周报'等多轮派生与多步规划）。每项含 "
+        "{role: 'user'|'assistant', content: str, task_type: str, has_result: bool}",
     )
 
 
@@ -256,6 +268,17 @@ class GenerateResponse(BaseModel):
     markdown: str = ""
     tool_logs: list[ToolLog] = Field(default_factory=list)
     error_message: str = ""
+    # ReAct 决策追溯（仅"自动识别"通道产生；显式点击通道为空）
+    reasoning_trace: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="ReAct 每轮决策追溯：step/thought/action/action_input/observation/status",
+    )
+    react_iteration: int = Field(default=0, description="ReAct 循环迭代轮数（0=未走 ReAct）")
+    outputs: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="多步产物列表（多步规划时每个子任务的 markdown + 结构化结果），"
+        "前端按顺序展示所有产物，避免后续 markdown 覆盖前一步",
+    )
 
 
 class ExportRequest(BaseModel):
@@ -347,6 +370,8 @@ class AgentState(TypedDict, total=False):
     routed_by: str
     needs_clarification: bool
     input_text: str
+    raw_input_text: str  # 原始输入（strip_template_prefix 前），供降级路由做关键词识别
+    history: list[dict[str, Any]]  # 历史对话上下文（ReAct 多轮感知）
     structured_result: dict[str, Any]
     email_draft: dict[str, Any]
     weekly_report: dict[str, Any]
@@ -360,5 +385,7 @@ class AgentState(TypedDict, total=False):
     # ReAct 循环新增字段
     react_messages: list[dict[str, Any]]  # OpenAI 多轮消息历史
     react_iteration: int  # 当前迭代轮数
+    reasoning_trace: list[dict[str, Any]]  # 结构化决策追溯（每轮 thought/action/observation）
+    outputs: list[dict[str, Any]]  # 多步产物列表（多步规划时每个子任务的 markdown + 结构化结果）
     _react_fallback: bool  # 内部标记：LLM 不可用时走降级路径
     _tool_context: dict[str, Any]  # 跨工具临时上下文（如 web_fetch 的 page）

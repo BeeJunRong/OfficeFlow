@@ -103,7 +103,20 @@ v1.6.0 起四个 Skill 均为完整实现，无 P1 占位。各 Skill 的设计�
 |------|------|------|----------|
 | POST | `/api/generate` | 输入文本与任务类型，返回结构化纪要 | v1.1.0 |
 | POST | `/api/derive` | 基于已有会话派生下游任务（复用源产物，不重抽） | v1.4.0 |
-| POST | `/api/email/send` | 显式发送邮件（四重闸门，默认 draft
+| POST | `/api/email/send` | 显式发送邮件（四重闸门，默认 draft_only） | v1.4.0 |
+| GET | `/api/email/protocols` | 协议清单与 SMTP 可用性 | v1.4.0 |
+| POST | `/api/export` | 用户显式点击导出 Markdown | v1.1.0 |
+| POST | `/api/retry` | 重试上一次失败的导出 | v1.1.0 |
+| GET | `/api/status/{session_id}` | 查询工具调用状态与导出记录 | v1.1.0 |
+| GET | `/api/download` | 下载导出文件（限 exports 目录，防路径穿越） | v1.1.0 |
+| GET/POST | `/api/config` | 读取/保存配置（密钥掩码，白名单写入） | v1.5.0 |
+| POST | `/api/config/test` | 测试模型连通性（可传未保存的值） | v1.5.0 |
+| GET | `/api/health` | 健康检查 | v1.1.0 |
+| POST | `/api/auth/register` | 注册新用户（PBKDF2 散列存储） | 未发布 |
+| POST | `/api/auth/login` | 登录，签发 7 天 Bearer 令牌 | 未发布 |
+| POST | `/api/auth/logout` | 登出，吊销令牌 | 未发布 |
+| GET/POST | `/api/conversations` | 当前用户对话列表/新建对话 | 未发布 |
+| GET/PUT/DELETE | `/api/conversations/{conv_id}` | 取/更新/删除单个对话 | 未发布 |
 
 ### 4.2 Skill 路由分层
 
@@ -144,25 +157,46 @@ v1.6.0 起四个 Skill 均完整实现，无 P1 占位。
 
 ---
 
-## 5. Agent 工作流（LangGraph）
+## 5. Agent 工作流（LangGraph，双通道架构）
+
+> **更新（未发布版本）**：工作流已从单通道 `route → execute` 演进为双通道架构。
+> - 通道 1（显式点击 → Skill 硬编码流水线）：`task_type` 非空时直接走 Skill，
+>   确定性、零编造、可验收。不经过 ReAct、不经过路由。
+> - 通道 2（"自动识别" → ReAct）：`task_type` 为空时走 ReAct 循环，
+>   LLM 通过 function calling 自主选择工具。
+>   LLM 不可用时降级到 `fallback_route → fallback_execute`（保留离线可用性）。
 
 ```text
 [入口]
   ↓
-[路由节点 route]
+[分发节点 dispatch]              ← clean_input_text 在此统一执行
   ↓
-  ├─ needs_clarification=true → END（追问用户选择任务类型）
-  └─ needs_clarification=false
+  ├─ task_type 非空 → [Skill 执行节点 skill_execute] → END
+  └─ task_type 为空 → [ReAct 入口 react]
        ↓
-     [执行节点 execute]
-       ↓
-       ├─ 调用对应 Skill（meeting_minutes / weekly_report / email_draft / web_summary）
-       │   ├─ clean_input_text（输入数据清理，v1.7.0 新增）
-       │   ├─ extract_fields（结构化抽取，三级降级 langextract→llm→rule）
-       │   ├─ validate（零编造校验）
-       │   └─ render_markdown
-       └─ END
+       ├─ LLM 可用 → ReAct 循环（LLM 自主选择工具）→ END
+       └─ LLM 不可用（_react_fallback=true）
+            ↓
+          [降级路由 fallback_route]
+            ↓
+            ├─ needs_clarification=true → END（追问用户选择任务类型）
+            └─ needs_clarification=false
+                 ↓
+               [降级执行 fallback_execute] → END
 ```
+
+**通道 1（显式点击）Skill 内部流程**：
+```text
+clean_input_text（输入数据清理，v1.7.0）
+  → extract_fields（结构化抽取，三级降级 langextract→llm→rule）
+  → validate（零编造校验）
+  → render_markdown
+```
+
+**通道 2（ReAct）工具集**（`app/react_tools.py` 注册 10 个工具）：
+`extract_fields` / `validate` / `render_markdown` / `build_weekly_report` /
+`render_weekly` / `build_email_draft` / `render_email` /
+`web_fetch` / `web_summarize` / `render_web_summary`
 
 **导出/重试不走图**，由 API 层显式触发（Q-02：导出必须用户点击）。
 
@@ -170,20 +204,25 @@ v1.6.0 起四个 Skill 均完整实现，无 P1 占位。
 
 | 节点 | 职责 |
 |------|------|
-| 路由节点 route | FR-00 分层路由：显式任务类型 → 指令区关键词 → LLM 分类兜底；确定 `task_type` 或返回追问。路由结果记入工具日志。 |
-| 执行节点 execute | 分发到对应 Skill；先调用 `clean_input_text` 清理输入格式噪声，再由 Skill 完成抽取→校验→渲染。低置信度时直接返回追问。 |
+| 分发节点 dispatch | 输入清理（`strip_template_prefix` → `clean_input_text`）；保留原始输入 `raw_input_text` 供降级路由与行号定位使用；由条件边决定走 Skill 通道还是 ReAct 通道。 |
+| Skill 执行节点 skill_execute | 通道 1：`task_type` 已由前端确定，直接分发到对应 Skill，不经过 ReAct、不经过路由。保留零编造、可验收、离线可用特性。 |
+| ReAct 入口 react | 通道 2：LLM 通过 function calling 自主选择工具与顺序，每轮 Thought → Action → Observation，最大迭代 8 轮。LLM 不可用时标记 `_react_fallback` 走降级路径。 |
+| 降级路由 fallback_route | LLM 不可用时用 FR-00 分层路由（显式→关键词→LLM 兜底）确定 `task_type`；用原始输入做路由（因 `strip_template_prefix` 会剥掉指令前缀）。 |
+| 降级执行 fallback_execute | 分发到 Skill（保留原有零编造流水线）。 |
 
 **导出/重试**由 API 层（`/api/export`、`/api/retry`）显式触发，独立于图。**派生**由 `/api/derive` 触发，复用源会话结构化结果，不重新抽取。
 
-### 5.2 状态字段（建议）
+### 5.2 状态字段
 
 ```python
 class AgentState(TypedDict, total=False):
     session_id: str
     task_type: str
-    routed_by: str
+    routed_by: str  # explicit / keyword / llm / fallback_rule / react
     needs_clarification: bool
     input_text: str
+    raw_input_text: str  # 原始输入（strip_template_prefix 前），供降级路由与行号定位
+    history: list[dict[str, Any]]  # 历史对话上下文（ReAct 多轮感知）
     structured_result: dict[str, Any]
     email_draft: dict[str, Any]
     weekly_report: dict[str, Any]
@@ -194,6 +233,13 @@ class AgentState(TypedDict, total=False):
     tool_logs: list[dict[str, Any]]
     export_status: str  # pending / success / failed
     error_message: str
+    # ReAct 循环新增字段
+    react_messages: list[dict[str, Any]]  # OpenAI 多轮消息历史
+    react_iteration: int  # 当前迭代轮数
+    reasoning_trace: list[dict[str, Any]]  # 结构化决策追溯
+    outputs: list[dict[str, Any]]  # 多步产物列表
+    _react_fallback: bool  # 内部标记：LLM 不可用时走降级路径
+    _tool_context: dict[str, Any]  # 跨工具临时上下文
 ```
 
 ---
@@ -228,47 +274,89 @@ class AgentState(TypedDict, total=False):
 
 ## 7. 数据模型（Pydantic）
 
+> **更新（v1.6.0 起）**：以下模型已从首版简版扩展为六段式 + 派生溯源字段。
+> 完整定义见 `app/schemas.py`，OpenAPI 声明见 `docs/api.yaml`。
+
 ```python
 from pydantic import BaseModel, Field
+from typing import Optional
+
+PENDING = "待确认"
 
 class ActionItem(BaseModel):
     task: str = Field(description="待办事项")
-    owner: str = Field(default="待确认", description="负责人")
-    deadline: str = Field(default="待确认", description="截止日期")
+    owner: str = Field(default=PENDING, description="负责人")
+    co_owner: str = Field(default=PENDING, description="协办")
+    deadline: str = Field(default=PENDING, description="截止时间")
+    deliverable: str = Field(default=PENDING, description="输出物")
     evidence: str = Field(default="", description="原文证据片段")
+    evidence_line: Optional[int] = Field(default=None, description="证据行号（1-based）")
+
+class NextMeeting(BaseModel):
+    time: str = Field(default=PENDING)
+    location: str = Field(default=PENDING)
+    agenda: str = Field(default=PENDING)
 
 class MeetingMinutes(BaseModel):
-    date: str = Field(default="待确认", description="会议日期")
-    topic: str = Field(default="待确认", description="会议主题")
-    decisions: list[str] = Field(default_factory=list, description="关键决定")
-    action_items: list[ActionItem] = Field(default_factory=list, description="待办列表")
+    # 标准六段式模板（16 字段）
+    date: str = Field(default=PENDING, description="会议时间")
+    location: str = Field(default=PENDING)
+    host: str = Field(default=PENDING)
+    attendees: list[str] = Field(default_factory=list)
+    observers: list[str] = Field(default_factory=list)
+    absentees: list[str] = Field(default_factory=list)
+    recorder: str = Field(default=PENDING)
+    reviewer: str = Field(default=PENDING)
+    topic: str = Field(default=PENDING)
+    agenda: list[str] = Field(default_factory=list)
+    discussion: list[str] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    action_items: list[ActionItem] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    next_meeting: NextMeeting = Field(default_factory=NextMeeting)
+    attachments: list[str] = Field(default_factory=list)
 
 class WebSummary(BaseModel):
-    url: str
-    title: str
-    key_points: list[str]  # 3-6 条摘自原文段落的要点
+    title: str = Field(default=PENDING)
+    url: str = Field(default="")
+    points: list[str] = Field(default_factory=list)  # 3-6 条摘自原文段落的要点
+    word_count: int = Field(default=0)
+
+class WeeklyReportItem(BaseModel):
+    content: str = Field(description="条目内容")
+    owner: str = Field(default=PENDING)
+    deadline: str = Field(default=PENDING)
+    evidence: str = Field(default="")
+    evidence_line: Optional[int] = Field(default=None)
 
 class WeeklyReport(BaseModel):
-    period: str
-    progress: list[str]
-    plans: list[str]
-    risks: list[str]
+    period: str = Field(default=PENDING)
+    topic: str = Field(default=PENDING)
+    progress: list[WeeklyReportItem] = Field(default_factory=list)  # 本周进展（来自决定）
+    next_plan: list[WeeklyReportItem] = Field(default_factory=list)  # 下周计划（来自待办）
+    risks: list[str] = Field(default_factory=list)
+    source_date: str = Field(default=PENDING)
 
 class EmailRecipient(BaseModel):
     name: str
-    email: str  # 用户手填，系统绝不推测或拼接
-    content: str
-    send: bool = False  # 是否勾选发送这封
+    email: str = Field(default="")  # 用户手填，系统绝不推测或拼接
+    content: str = Field(default="")
+    send: bool = Field(default=False)
 
 class EmailDraft(BaseModel):
-    sender: str
-    subject: str
-    recipients: list[EmailRecipient]
+    sender: str = Field(default=PENDING)
+    protocol: str = Field(default="draft_only")  # draft_only / mailto / smtp
+    subject: str = Field(default="")
+    greeting: str = Field(default="")
+    recipients: list[EmailRecipient] = Field(default_factory=list)
+    shared_body: str = Field(default="")
+    source_topic: str = Field(default=PENDING)
+    source_date: str = Field(default=PENDING)
 
 class DerivedTask(BaseModel):
     task_type: str
     label: str
-    reason: str
+    reason: str = Field(default="")
 ```
 
 其余请求/响应模型（`GenerateRequest`/`GenerateResponse`/`DeriveRequest`/`EmailSendRequest`/`EmailSendResponse`/`ConfigUpdateRequest`/`ConfigTestRequest` 等）详见 `app/schemas.py`。
@@ -287,14 +375,21 @@ class DerivedTask(BaseModel):
 
 v1.1.0 起引入 SQLite 工具日志（`officeflow_logs.db`），仅记录验收证据，不参与核心生成流程：
 
-| 表 | 字段 |
-|----|------|
-| `sessions` | `session_id`, `task_type`, `input_text`, `created_at` |
-| `results` | `session_id`, `structured_output`, `edited_output`, `export_status` |
-| `tool_logs` | `id`, `session_id`, `tool_name`, `status`, `error_message`, `timestamp` |
-| `export_records` | `id`, `session_id`, `file_path`, `status`, `error_message`, `timestamp` |
+| 表 | 字段 | 说明 |
+|----|------|------|
+| `sessions` | `session_id`, `task_type`, `input_text`, `created_at` | 会话基础信息 |
+| `results` | `session_id`, `structured_output`, `edited_output`, `export_status` | 结构化产物 |
+| `tool_logs` | `id`, `session_id`, `tool_name`, `status`, `error_message`, `timestamp` | 工具调用日志 |
+| `export_records` | `id`, `session_id`, `file_path`, `status`, `error_message`, `timestamp` | 导出记录 |
+| `users` | `id`, `username`, `password_hash`, `salt`, `created_at` | 用户认证（未发布新增） |
+| `auth_tokens` | `token`, `user_id`, `created_at`, `expires_at` | 登录令牌（未发布新增） |
+| `conversations` | `id`, `user_id`, `title`, `turns`, `created_at`, `updated_at` | 对话持久化（未发布新增） |
 
 数据库仅用于日志和证据，不参与核心生成流程。同一会话重试成功后仅保留一条成功导出记录（E1 无重复记录要求）。
+
+> **新增表说明（未发布版本）**：
+> - `users` / `auth_tokens`：用户注册/登录/登出，口令 PBKDF2-SHA256 散列存储，令牌 7 天有效。属于"单机多用户登录隔离"，非"跨账号权限管理"（后者指组织间 RBAC/多租户，仍在排除项）。
+> - `conversations`：按用户隔离的对话持久化，`turns` 为前端整存整取的 JSON 序列。
 
 ---
 
@@ -343,13 +438,19 @@ streamlit run frontend/app.py
 
 ### 10.3 目录结构（建议）
 
+> **更新（未发布版本）**：新增 `auth.py` / `conversations.py` / `react_node.py` / `react_tools.py` 4 个核心文件。
+
 ```text
 officeflow/
 ├── app/
-│   ├── main.py              # FastAPI 入口（generate/derive/email·send/config/export/retry/status/download/health）
+│   ├── main.py              # FastAPI 入口（generate/derive/email·send/config/export/retry/status/download/health/auth/conversations）
 │   ├── env.py               # .env 加载器（必须在业务 import 前调用）
+│   ├── auth.py              # 用户认证：注册/登录/登出 + Bearer 令牌（未发布新增）
+│   ├── conversations.py     # 对话持久化：按用户隔离的对话 CRUD（未发布新增）
 │   ├── config_store.py      # Web 配置面板后端：字段白名单、掩码回显、写 .env、连通性测试
-│   ├── graph.py             # LangGraph 工作流（route → execute）
+│   ├── graph.py             # LangGraph 工作流（双通道：dispatch → skill_execute | react）
+│   ├── react_node.py        # ReAct 循环节点：LLM 自主选择工具（未发布新增）
+│   ├── react_tools.py       # ReAct 工具注册表：10 个工具的 spec + handler（未发布新增）
 │   ├── router.py            # FR-00 分层路由 + 模板前缀剥离
 │   ├── derive.py            # FR-06 派生规则（只给有依据的方向）
 │   ├── cleaning.py          # 输入数据清理（v1.7.0 新增：统一换行/去不可见字符/压缩空白）

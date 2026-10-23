@@ -72,6 +72,7 @@ _DECISION_NEGATION_RE = re.compile(r"(没有|未|无)[^，。；]{0,8}(决定|�
 _TODO_HINTS = (
     "负责", "完成", "跟进", "落实", "推进", "执行", "准备", "编写", "提交",
     "整理", "调研", "开发", "测试", "标注", "制作", "修改", "完善", "补充",
+    "同步", "联系", "沟通", "确认", "发送", "提供", "给出", "上线", "修复",
 )
 _TODO_MARKER_RE = re.compile(r"(?<!没有)(?<!未)(?<!无)(待办|行动项)")
 _TODO_NEGATION_RE = re.compile(r"(没有|未|无)[^，。；]{0,6}(待办|行动项|需要|负责)")
@@ -83,6 +84,16 @@ _SURNAMES = (
     "陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤"
 )
 _NAME_RE = re.compile(rf"[{_SURNAMES}][一-龥]{{1,3}}")
+
+# 口语化昵称：阿敏、老王、小李、张哥、王姐、李总、王老师
+_NICKNAME_RE = re.compile(r"(?:阿[一-龥]|老[一-龥]|小[一-龥]|[一-龥](?:哥|姐|总|老师))")
+
+# 昵称/姓氏匹配的常见误报词（不是人名）
+_NAME_STOPWORDS = {
+    "小时", "小组", "小学", "小型", "小结", "小数", "小孩", "老人", "老板", "老师",
+    "周报", "日报", "月报", "年报", "会议", "纪要", "文档", "需求", "接口", "前端",
+    "后端", "测试", "项目", "决定", "完成", "负责", "问题", "进度", "内容", "任务",
+}
 
 # 人名后常跟的动词/虚词：贪婪匹配会吃进来，需裁掉（"王敏负责"→"王敏"）
 _NAME_TRAILING_RE = re.compile(r"(负责|完成|汇报|提出|表示|建议|说|需要|需|将|于|在|的|等|与|和|及)+$")
@@ -101,18 +112,21 @@ def _extract_name(sent: str) -> str | None:
     按词边界上下文打分：前后都是边界字符（标点/由/在/负责…）的候选优先。
     """
     best: tuple[str, int] | None = None
-    for m in _NAME_RE.finditer(sent):
-        name = _NAME_TRAILING_RE.sub("", m.group(0))
-        if not name or len(name) < _NAME_CANDIDATE_MIN_LEN:
-            continue
-        end = m.start() + len(name)
-        before = sent[m.start() - 1] if m.start() > 0 else " "
-        after = sent[end] if end < len(sent) else " "
-        score = int(before in _BOUNDARY_BEFORE) + int(after in _BOUNDARY_AFTER)
-        if score == 2:
-            return name
-        if best is None or score > best[1]:
-            best = (name, score)
+    for pattern in (_NAME_RE, _NICKNAME_RE):
+        for m in pattern.finditer(sent):
+            name = _NAME_TRAILING_RE.sub("", m.group(0))
+            if not name or len(name) < _NAME_CANDIDATE_MIN_LEN:
+                continue
+            if name in _NAME_STOPWORDS:
+                continue
+            end = m.start() + len(name)
+            before = sent[m.start() - 1] if m.start() > 0 else " "
+            after = sent[end] if end < len(sent) else " "
+            score = int(before in _BOUNDARY_BEFORE) + int(after in _BOUNDARY_AFTER)
+            if score == 2:
+                return name
+            if best is None or score > best[1]:
+                best = (name, score)
     return best[0] if best else None
 
 # 话题：剥掉日期后的"XX例会/会议/周会/组会/评审/讨论"短语
@@ -170,7 +184,9 @@ _MARKER_RE = re.compile(r"^(待办|行动项|事项)[：:，,、]?")
 _LEADING_FILLERS = re.compile(r"^(请|需要|务必|按时|由|在|于)+")
 # "前完成X" → "X"：截止助词 + 前导动词一起剥（"前"单独出现不剥，避免误伤"前端"）
 _VERB_PREFIX_RE = re.compile(
-    r"^(?:前|以前|日前|之内|内)?(完成|提交|编写|准备|整理|负责|跟进|推进|落实|接入|补充)"
+    r"^(?:前|以前|日前|之内|内)?"
+    r"(完成|提交|编写|准备|整理|负责|跟进|推进|落实|接入|补充|"
+    r"跟|同步|联系|沟通|确认|发送|提供|给出|上线|修复)"
 )
 _LEADING_VERBS = (
     "完成", "提交", "编写", "准备", "整理", "负责", "跟进", "推进", "落实"
@@ -235,16 +251,34 @@ def _normalize_date_breaks(text: str) -> str:
     return re.sub(r"(\d{1,2}月\d{1,2})\s+日", r"\1日", text)
 
 
-_TODO_CLAUSE_SEPARATOR_RE = re.compile(
-    r"[，,]\s*(?=[一-龥]{2,4}(?:负责)?\s*在\s*"
-    r"(?:\d{1,4}[年/-])?\d{1,2}[月/-]\d{1,2}日?前"
-    r"(?:完成|提交|编写|准备|整理|负责|跟进|推进|落实|开发|测试|制作|修改|完善|接入))"
-)
+_CLAUSE_CONNECTORS = re.compile(r"^(?:和|以及|及|然后|再|同时|另外|接着)\s*")
 
 
 def _split_todo_clauses(sentence: str) -> list[str]:
-    """Split one todo sentence into clauses, one owner assignment per clause."""
-    return [part.strip() for part in _TODO_CLAUSE_SEPARATOR_RE.split(sentence) if part.strip()]
+    """把一条待办句按逗号拆成"一位负责人一个子句"。
+
+    仅当逗号后的子句**以人名开头**且包含明确的任务语义（待办动词或日期）时才拆分，
+    避免把同一事项的补充说明误拆。覆盖真实样本：
+      "小李在10月13日前完成登录页修复，张哥在10月15日前跟客户同步进展"
+      "阿敏负责调连接池，王敏协办"（协办不拆）
+    """
+    parts = re.split(r"[，,]", sentence)
+    if len(parts) <= 1:
+        return [sentence.strip()] if sentence.strip() else []
+
+    result: list[str] = [parts[0]]
+    for raw in parts[1:]:
+        candidate = _CLAUSE_CONNECTORS.sub("", raw.strip())
+        name = _extract_name(candidate)
+        starts_with_name = bool(name) and candidate.find(name) <= 1
+        has_task_semantics = any(h in candidate for h in _TODO_HINTS) or any(
+            regex.search(candidate) for regex, _ in _DATE_PATTERNS
+        )
+        if starts_with_name and has_task_semantics:
+            result.append(candidate)
+        else:
+            result[-1] += "，" + raw
+    return [clause.strip() for clause in result if clause.strip()]
 
 
 def _clean_evidence(sentence: str) -> str:
@@ -322,8 +356,16 @@ def rule_based_extract(text: str) -> MeetingMinutes:
             continue
         has_marker = _TODO_MARKER_RE.search(sent) is not None
         name = _extract_name(sent)
+        # 决议句优先：无显式"待办/行动项"标记时，含"决定/商定/通过"的句子
+        # 归入会议决议，不因句中碰巧含待办动词（如"同步"）被误当成待办。
+        is_decision_sentence = (
+            _DECISION_HINT_RE.search(sent) is not None
+            and _DECISION_NEGATION_RE.search(sent) is None
+        )
         is_todo = has_marker or (
-            any(h in sent for h in _TODO_HINTS) and name is not None
+            not is_decision_sentence
+            and any(h in sent for h in _TODO_HINTS)
+            and name is not None
         )
         if not is_todo:
             continue
